@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─── Rust unit + integration tests ─────────────────────────────────────────
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+      - name: Integration tests
+        run: cargo test --workspace --test '*'
+        env:
+          COTURN_AUTH_SECRET: test_secret_for_ci
+          COTURN_REALM: coturn.roomler.live
+          OXMUX_JWT_SECRET: ci_jwt_secret_placeholder
+
+  # ─── Vue 3 client build + lint ──────────────────────────────────────────────
+  client-build:
+    name: Client build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_WS_URL: ws://localhost:8080/ws
+          VITE_API_BASE_URL: http://localhost:8080
+
+  # ─── E2E tests ──────────────────────────────────────────────────────────────
+  e2e:
+    name: E2E tests
+    runs-on: ubuntu-latest
+    needs: [rust-test, client-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm ci && npx playwright install --with-deps chromium
+
+      - name: Start test stack
+        run: |
+          cp .env.example .env
+          echo "OXMUX_JWT_SECRET=e2e_test_secret" >> .env
+          echo "COTURN_AUTH_SECRET=e2e_coturn_secret" >> .env
+          docker compose up -d --build
+          sleep 5
+
+      - name: Run E2E tests
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+
+      - name: Tear down
+        if: always()
+        run: docker compose down
+
+  # ─── Docker build ───────────────────────────────────────────────────────────
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [rust-test, client-build]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/gjovanov/oxmux:latest
+            ghcr.io/gjovanov/oxmux:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trigger deploy
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_TOKEN }}
+          repository: gjovanov/oxmux-deploy
+          event-type: image-updated
+          client-payload: |
+            {
+              "image": "ghcr.io/gjovanov/oxmux:${{ github.sha }}",
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}"
+            }

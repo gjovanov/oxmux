@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "server",
+    "agent",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Goran Jovanov <goran@roomler.live>"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+tracing = "1"
+bytes = "1"

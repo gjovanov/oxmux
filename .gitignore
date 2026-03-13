@@ -1,0 +1,37 @@
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+client/dist/
+server/static/
+e2e/playwright-report/
+e2e/test-results/
+
+# Env
+.env
+*.env.local
+
+# TLS certs
+certs/
+*.pem
+*.key
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/

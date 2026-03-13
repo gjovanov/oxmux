@@ -1,0 +1,31 @@
+services:
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+      - "4433:4433/udp"
+    env_file: .env
+    environment:
+      OXMUX_HOST: "0.0.0.0"
+      OXMUX_PORT: "8080"
+    volumes:
+      - ./certs:/etc/oxmux/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Dev-only: Vue 3 hot-reload server
+  client:
+    image: node:22-slim
+    working_dir: /app
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    env_file: .env
+    command: sh -c "npm install && npm run dev -- --host"
+    profiles: ["dev"]
