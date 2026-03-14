@@ -15,5 +15,5 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
-tracing = "1"
-bytes = "1"
+tracing = "0.1"
+bytes = { version = "1", features = ["serde"] }

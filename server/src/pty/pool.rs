@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 use super::pane::PaneSession;
 

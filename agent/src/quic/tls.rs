@@ -7,10 +7,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 /// instead of doing full CA-based verification.
 pub fn self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let subject_alt_names = vec!["oxmux-agent".to_string(), "localhost".to_string()];
-    let cert = generate_simple_self_signed(subject_alt_names)?;
+    let certified_key = generate_simple_self_signed(subject_alt_names)?;
 
-    let cert_der = CertificateDer::from(cert.serialize_der()?);
-    let key_der = PrivateKeyDer::try_from(cert.serialize_private_key_der())
+    let cert_der = certified_key.cert.der().clone();
+    let key_der = PrivateKeyDer::try_from(certified_key.key_pair.serialize_der())
         .map_err(|e| anyhow::anyhow!("private key error: {}", e))?;
 
     // Print fingerprint for operator to copy into relay server config

@@ -8,46 +8,77 @@ Oxmux is a Claude Code fleet manager — a tmux web client that provides structu
 
 ```
 oxmux/
-├── server/    Rust: Axum WS server, SSH (russh), QUIC (quinn), PTY, tmux control mode
+├── server/    Rust: Axum HTTP/WS/QUIC/WebRTC server, SSH (russh), PTY, tmux control mode
 ├── client/    Vue 3: xterm.js terminal UI + structured Claude Code dashboard
-├── agent/     Rust: standalone binary deployed on remote machines for QUIC/WebRTC P2P
-└── e2e/       Playwright tests
+├── agent/     Rust: lightweight binary deployed on remote hosts for P2P QUIC/WebRTC
+├── e2e/       Playwright E2E tests
+└── docs/      Architecture, API, UI, deployment documentation
 ```
 
-## Key Architecture Decisions
+## 5-Transport Architecture
 
-### Transport Hierarchy
-1. **WebRTC DataChannel P2P** (preferred) — browser connects directly to oxmux-agent via QUIC/DTLS. COTURN relay only for ICE fallback.
-2. **QUIC server↔agent** (server-side) — relay server connects to agent via quinn QUIC, not SSH.
-3. **WebSocket SSH fallback** — when no agent installed, relay server uses russh to SSH into remote host.
+All transports carry the same binary MessagePack protocol. The user always gets a tmux terminal — only the data path changes.
+
+### Server-Relayed (SSH backend)
+1. **WS → SSH** — Browser →WebSocket→ Server →SSH→ Host →tmux (default, works everywhere)
+2. **QUIC → SSH** — Browser →QUIC→ Server →SSH→ Host →tmux (low latency, 0-RTT)
+3. **WebRTC → SSH** — Browser →WebRTC→ Server →SSH→ Host →tmux (NAT traversal)
+
+### Agent-Direct (P2P, no SSH)
+4. **QUIC → Agent** — Browser →QUIC→ Agent →tmux (lowest latency, no server relay)
+5. **WebRTC → Agent** — Browser →WebRTC→ Agent →tmux (P2P through any NAT)
+
+### Session Configuration
+```rust
+pub struct SessionConfig {
+    pub name: String,
+    pub browser_transport: BrowserTransport,  // WS, QUIC, WebRTC
+    pub backend_transport: BackendTransport,  // SSH or Agent
+}
+```
 
 ### TURN Credentials
 - COTURN at `coturn.roomler.live` uses **shared secret HMAC-SHA1** (time-limited)
 - `username = "<unix_timestamp + ttl>:<user_id>"`
 - `password = base64(HMAC-SHA1(COTURN_AUTH_SECRET, username))`
-- Generated server-side in `server/src/webrtc/turn.rs`, sent to client on WebRTC session init
+- Generated server-side in `server/src/webrtc/turn.rs`
 - TTL: 86400s (24h). Never expose `COTURN_AUTH_SECRET` to browser.
-- ICE servers: all 3 workers: mars (198.51.100.10), zeus (198.51.100.20), jupiter (198.51.100.30) on ports 3478/5349
+- ICE servers: mars, zeus, jupiter on ports 3478/5349
 
 ### Claude Code Integration
 - `claude --output-format stream-json` emits JSONL
-- Parser in `server/src/claude/parser.rs` (Rust) and forwarded as structured `ServerMsg::ClaudeEvent`
-- Vue renders `ClaudePane.vue` for structured view vs `TerminalPane.vue` for raw PTY
-- Mode is auto-detected from process name in tmux pane
+- Parser in `server/src/claude/parser.rs` → forwarded as `ServerMsg::ClaudeEvent`
+- Vue renders `ClaudePane.vue` (structured) vs `TerminalPane.vue` (raw PTY)
+- Mode auto-detected from process name in tmux pane
 
 ### PTY / tmux
-- `portable-pty` crate for PTY management
-- tmux control mode (`tmux -CC`) for structured state (sessions/windows/panes/layout)
-- One `broadcast::channel` per pane — all subscribed WS clients receive same bytes
+- tmux control mode (`tmux -CC attach`) for structured state + live output streaming
+- `%output` events decoded from octal escaping → broadcast per pane
+- `send-keys -H` for hex-encoded input to panes
+- One `broadcast::channel` per pane — all subscribed clients receive same bytes
 
 ### Protocol
-- Binary MessagePack frames over WebSocket (not JSON)
+- Binary MessagePack frames (not JSON)
 - `server/src/ws/protocol.rs` defines `ServerMsg` and `ClientMsg` enums
+- Same protocol used over WS, QUIC streams, and WebRTC DataChannels
+
+### Auth
+- JWT tokens (argon2 password hashing, 7-day expiry)
+- WS: `?token=<jwt>` query param
+- QUIC/WebRTC: JWT in first message
+- Sessions scoped by user_id (SQLite persistence)
+
+### Agent
+- Lightweight binary deployed on remote hosts
+- Manages tmux locally (no SSH needed)
+- QUIC listener for server or browser connections
+- Auto-deployed via SSH from server, or manually installed
+- Self-signed TLS certs for QUIC
 
 ## Environment Variables
 
-All config comes from `.env` (dev) or Kubernetes Secret (prod). See `.env.example` for all vars.
-Critical vars: `COTURN_AUTH_SECRET`, `COTURN_REALM`, `QUIC_CERT_PATH`, `QUIC_KEY_PATH`.
+All config from `.env` (dev) or Kubernetes Secret (prod). See `.env.example`.
+Critical vars: `OXMUX_JWT_SECRET`, `COTURN_AUTH_SECRET`, `COTURN_REALM`, `QUIC_CERT_PATH`, `QUIC_KEY_PATH`, `DATABASE_URL`.
 
 ## Commands
 
@@ -79,18 +110,38 @@ docker compose up server       # server only
 - `dashmap::DashMap` for concurrent maps (not `Mutex<HashMap>`)
 - All public types `Serialize + Deserialize` via serde
 - Error types: `thiserror` for library-style errors
+- `async-trait` for async trait methods
 
 ## Code Style (Vue 3 / TypeScript)
 
 - Composition API only (no Options API)
 - Pinia stores for all shared state
-- `useWebSocket` composable handles all WS lifecycle
 - `useTerminal` composable wraps xterm.js per pane
 - Binary MessagePack via `@msgpack/msgpack`
+- Transport composables: `useWebSocket`, `useQuic`, `useWebRtc`
 
-## Testing Notes
+## Testing
 
-- Rust integration tests spin up real tmux with isolated socket (`-S /tmp/test-<uuid>.sock`)
-- SSH integration uses `testcontainers-rs` with `linuxserver/openssh-server`
-- E2E tests require `docker compose up` running
-- xterm.js accessibility layer (`data-testid="terminal-accessible-output"`) used for Playwright assertions
+- **Rust integration tests** (`server/tests/`) — real SSH to mars (94.130.141.98), id_secunet key
+- **E2E tests** (`e2e/tests/`) — Playwright against https://oxmux.app, per-transport test files
+- **Load tests** (`e2e/load/`) — k6 WebSocket load test
+- xterm.js accessibility layer (`data-testid="terminal-accessible-output"`) for Playwright assertions
+- E2E tests take screenshots at each step for visual verification
+
+## Key Files
+
+| Area | Files |
+|------|-------|
+| Transport types | `server/src/session/types.rs` |
+| Transport trait | `server/src/session/transport.rs` |
+| SSH backend | `server/src/session/ssh_transport.rs` |
+| Session manager | `server/src/session/manager.rs` |
+| WS handler | `server/src/ws/handler.rs` |
+| Protocol | `server/src/ws/protocol.rs` |
+| Auth | `server/src/auth/handler.rs`, `server/src/auth/jwt.rs` |
+| Database | `server/src/db/repo.rs` |
+| tmux parser | `server/src/tmux/control.rs` |
+| Claude parser | `server/src/claude/parser.rs` |
+| TURN creds | `server/src/webrtc/turn.rs` |
+| Terminal UI | `client/src/composables/useTerminal.ts` |
+| Stores | `client/src/stores/tmux.ts`, `client/src/stores/auth.ts` |

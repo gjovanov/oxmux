@@ -59,7 +59,7 @@ impl ControlModeParser {
         if let Some(ref mut block) = self.in_block {
             if let Some(rest) = line.strip_prefix("%end ") {
                 // Close block
-                let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+                let _parts: Vec<&str> = rest.splitn(3, ' ').collect();
                 let lines = block.lines.clone();
                 let ts = block.timestamp;
                 let fl = block.flags;

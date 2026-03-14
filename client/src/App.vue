@@ -1,6 +1,8 @@
 <template>
-  <div class="app">
+  <LoginPage v-if="!auth.isAuthenticated" />
+  <div v-else class="app">
     <SessionSidebar />
+    <NewSessionDialog v-if="store.showNewSessionDialog" />
     <main class="pane-area">
       <template v-if="store.activePane">
         <ClaudePane
@@ -17,7 +19,10 @@
       </template>
       <div v-else class="empty-pane">
         <div class="empty-message">
-          <span class="empty-icon">🐙</span>
+          <div class="user-bar">
+            Logged in as <strong>{{ auth.user?.username }}</strong>
+            <button class="logout-btn" @click="auth.logout()">Logout</button>
+          </div>
           <h2>Oxmux</h2>
           <p>Select a tmux pane from the sidebar to begin.</p>
         </div>
@@ -27,18 +32,39 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import { useTmuxStore } from '@/stores/tmux'
+import LoginPage from '@/components/LoginPage.vue'
 import SessionSidebar from '@/components/SessionSidebar.vue'
+import NewSessionDialog from '@/components/NewSessionDialog.vue'
 import TerminalPane from '@/components/TerminalPane.vue'
 import ClaudePane from '@/components/ClaudePane.vue'
 
+const auth = useAuthStore()
 const store = useTmuxStore()
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/ws`
+const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 
-onMounted(() => {
-  store.connect(WS_URL)
+function connectWs() {
+  if (auth.token) {
+    const wsUrl = `${wsProto}//${window.location.host}/ws?token=${auth.token}`
+    store.connect(wsUrl)
+  }
+}
+
+onMounted(async () => {
+  await auth.checkAuth()
+  if (auth.isAuthenticated) {
+    connectWs()
+  }
+})
+
+// Reconnect WS when auth state changes (login/logout)
+watch(() => auth.isAuthenticated, (isAuth) => {
+  if (isAuth) {
+    connectWs()
+  }
 })
 
 const activeIsClaudePane = computed(() => {
@@ -47,7 +73,7 @@ const activeIsClaudePane = computed(() => {
 })
 
 function openDiff(path: string) {
-  console.log('Open diff:', path) // TODO: Monaco diff viewer
+  console.log('Open diff:', path)
 }
 </script>
 
@@ -80,7 +106,22 @@ body { background: #1e1e2e; color: #cdd6f4; font-family: system-ui, sans-serif; 
   text-align: center;
   color: #585b70;
 }
-.empty-icon { font-size: 48px; display: block; margin-bottom: 12px; }
 h2 { font-size: 24px; margin-bottom: 8px; color: #89b4fa; }
 p { font-size: 14px; }
+.user-bar {
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: #a6adc8;
+}
+.logout-btn {
+  margin-left: 8px;
+  padding: 2px 10px;
+  background: #313244;
+  border: none;
+  border-radius: 4px;
+  color: #f38ba8;
+  font-size: 11px;
+  cursor: pointer;
+}
+.logout-btn:hover { background: #45475a; }
 </style>

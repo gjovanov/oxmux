@@ -69,7 +69,7 @@ impl Config {
         dotenvy::dotenv().ok();
 
         let cfg = config::Config::builder()
-            .add_source(config::Environment::default().separator("_"))
+            .add_source(config::Environment::default())
             .build()?;
 
         let config = Config {

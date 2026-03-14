@@ -1,7 +1,6 @@
-import { ref, onMounted, onUnmounted, type Ref } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, type Ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
 import { useTmuxStore } from '@/stores/tmux'
@@ -33,7 +32,13 @@ export function useTerminal(
   let resizeObserver: ResizeObserver | null = null
 
   function mount() {
-    if (!containerRef.value || !paneId.value) return
+    if (!containerRef.value || !paneId.value) {
+      console.warn('[oxmux] terminal mount skipped: no container or paneId')
+      return
+    }
+
+    console.log('[oxmux] mounting terminal for pane', paneId.value,
+      'container:', containerRef.value.offsetWidth, 'x', containerRef.value.offsetHeight)
 
     const t = new Terminal({
       allowProposedApi: true,
@@ -53,16 +58,15 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Try WebGL renderer first, fall back to canvas
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => webgl.dispose())
-      t.loadAddon(webgl)
-    } catch {
-      console.warn('WebGL renderer unavailable, using canvas')
-    }
+    // Skip WebGL addon — use default canvas renderer for reliability
+    // WebGL can fail silently in headless browsers, VMs, and some GPUs
 
-    fitAddon.fit()
+    // Delay fit to ensure container has layout dimensions
+    requestAnimationFrame(() => {
+      fitAddon.fit()
+      console.log('[oxmux] terminal fitted:', t.cols, 'x', t.rows)
+    })
+
     term.value = t
 
     // Input → server
@@ -92,8 +96,14 @@ export function useTerminal(
     })
     resizeObserver.observe(containerRef.value)
 
-    // Initial resize
-    store.sendResize(paneId.value, t.cols, t.rows)
+    // Initial resize after a short delay
+    setTimeout(() => {
+      fitAddon.fit()
+      store.sendResize(paneId.value, t.cols, t.rows)
+    }, 100)
+
+    // Write a welcome message to confirm rendering works
+    t.write('\r\n\x1b[90m[oxmux] connecting to pane ' + paneId.value + '...\x1b[0m\r\n')
   }
 
   function focus() {
@@ -111,7 +121,12 @@ export function useTerminal(
     term.value = null
   }
 
-  onMounted(mount)
+  onMounted(() => {
+    // Use nextTick to ensure the DOM is fully rendered
+    nextTick(() => {
+      mount()
+    })
+  })
   onUnmounted(dispose)
 
   return { term, focus, search, dispose }

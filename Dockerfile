@@ -1,5 +1,5 @@
 # ─── Stage 1: Build Rust server ───────────────────────────────────────────────
-FROM rust:1.82-slim AS server-builder
+FROM rust:1.91-slim AS server-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
@@ -29,20 +29,20 @@ COPY client/package.json client/package-lock.json* ./
 RUN npm ci
 
 COPY client/ ./
-RUN npm run build
+RUN npx vite build
 
 # ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tmux && \
+    ca-certificates tmux openssh-client openssl && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash oxmux
 
 WORKDIR /app
 COPY --from=server-builder /build/target/release/oxmux-server ./
-COPY --from=client-builder /build/dist ./static
+COPY --from=client-builder /server/static ./static
 
 USER oxmux
 EXPOSE 8080 4433/udp

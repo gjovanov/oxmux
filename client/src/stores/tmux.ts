@@ -56,15 +56,64 @@ export interface IceConfig {
   }>
 }
 
+// ── Session management types ──────────────────────────────────────────
+
+export type BrowserTransportType = 'websocket' | 'quic' | 'webrtc'
+
+export type SshAuth =
+  | { method: 'agent' }
+  | { method: 'password'; password: string }
+  | { method: 'private_key'; path: string; passphrase?: string }
+
+export interface SshBackend {
+  type: 'ssh'
+  host: string
+  port: number
+  user: string
+  auth: SshAuth
+}
+
+export interface AgentBackend {
+  type: 'agent'
+  host: string
+  port: number
+  agent_id?: string
+}
+
+export interface LocalBackend {
+  type: 'local'
+}
+
+export type BackendTransport = SshBackend | AgentBackend | LocalBackend
+
+export interface TransportConfig {
+  browser: BrowserTransportType
+  backend: BackendTransport
+}
+
+export type SessionStatus = 'created' | 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'error'
+
+export interface ManagedSession {
+  id: string
+  name: string
+  transport: TransportConfig
+  status: SessionStatus
+  error?: string
+  tmux_sessions: TmuxSessionInfo[]
+}
+
 type PaneOutputHandler = (data: Uint8Array) => void
 
 export const useTmuxStore = defineStore('tmux', () => {
   // State
   const sessions = ref<TmuxSessionInfo[]>([])
+  const managedSessions = ref<ManagedSession[]>([])
   const activePane = ref<string | null>(null)
+  const activeSessionId = ref<string | null>(null)
   const claudeSessions = ref<Map<string, ClaudeSessionState>>(new Map())
   const connectionStatus = ref<'disconnected' | 'connecting' | 'connected' | 'reconnecting'>('disconnected')
   const ws = ref<WebSocket | null>(null)
+  const showNewSessionDialog = ref(false)
 
   // pane_id → output handler (registered by TerminalPane components)
   const paneHandlers = new Map<string, PaneOutputHandler>()
@@ -88,6 +137,10 @@ export const useTmuxStore = defineStore('tmux', () => {
       .reduce((sum, s) => sum + s.totalCostUsd, 0)
   )
 
+  // Abstract transport — send function set by connect()
+  let transportSend: ((msg: Record<string, unknown>) => void) | null = null
+  let transportClose: (() => void) | null = null
+
   // Actions
   function connect(wsUrl: string) {
     if (ws.value?.readyState === WebSocket.OPEN) return
@@ -99,8 +152,13 @@ export const useTmuxStore = defineStore('tmux', () => {
     socket.onopen = () => {
       connectionStatus.value = 'connected'
       backoffMs = 1000
-      // Request full state on connect
-      sendMsg({ t: 'cmd', command: 'list-sessions' })
+      transportSend = (msg) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(encode(msg))
+        }
+      }
+      transportClose = () => socket.close()
+      sendMsg({ t: 'sess_list' })
     }
 
     socket.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
@@ -114,6 +172,7 @@ export const useTmuxStore = defineStore('tmux', () => {
 
     socket.onclose = () => {
       connectionStatus.value = 'reconnecting'
+      transportSend = null
       scheduleReconnect(wsUrl)
     }
 
@@ -122,6 +181,73 @@ export const useTmuxStore = defineStore('tmux', () => {
     }
 
     ws.value = socket
+  }
+
+  /** Connect via WebTransport (QUIC). */
+  async function connectQuic(url: string, token: string) {
+    const { connectQuic: doConnect } = await import('@/composables/useQuic')
+
+    connectionStatus.value = 'connecting'
+    try {
+      const conn = await doConnect(url, token)
+
+      connectionStatus.value = 'connected'
+      backoffMs = 1000
+      transportSend = (msg) => conn.send(msg)
+      transportClose = () => conn.close()
+
+      conn.onMessage((msg) => handleServerMsg(msg))
+      conn.onClose(() => {
+        connectionStatus.value = 'disconnected'
+        transportSend = null
+      })
+
+      sendMsg({ t: 'sess_list' })
+    } catch (e) {
+      console.error('[oxmux] QUIC connection failed:', e)
+      connectionStatus.value = 'disconnected'
+    }
+  }
+
+  /**
+   * Connect via WebRTC DataChannel.
+   * Requires an existing WS connection for signaling.
+   */
+  async function connectWebRtcTransport(iceConfig: any) {
+    const { connectWebRtc } = await import('@/composables/useWebRtc')
+
+    connectionStatus.value = 'connecting'
+    try {
+      // Signal handlers — route via existing WS
+      const signalHandlers: ((payload: Record<string, unknown>) => void)[] = []
+
+      const conn = await connectWebRtc(
+        iceConfig,
+        (payload) => {
+          // Send signaling via WS
+          sendMsg({ t: 'sig', peer_id: 'server', payload })
+        },
+        (handler) => {
+          signalHandlers.push(handler)
+        },
+      )
+
+      connectionStatus.value = 'connected'
+      backoffMs = 1000
+      transportSend = (msg) => conn.send(msg)
+      transportClose = () => conn.close()
+
+      conn.onMessage((msg) => handleServerMsg(msg))
+      conn.onClose(() => {
+        connectionStatus.value = 'disconnected'
+        transportSend = null
+      })
+
+      sendMsg({ t: 'sess_list' })
+    } catch (e) {
+      console.error('[oxmux] WebRTC connection failed:', e)
+      connectionStatus.value = 'disconnected'
+    }
   }
 
   function scheduleReconnect(wsUrl: string) {
@@ -133,36 +259,37 @@ export const useTmuxStore = defineStore('tmux', () => {
   }
 
   function sendMsg(msg: Record<string, unknown>) {
-    if (ws.value?.readyState !== WebSocket.OPEN) return
-    ws.value.send(encode(msg))
+    if (!transportSend) {
+      console.warn('[oxmux] sendMsg: not connected, dropping:', msg.t)
+      return
+    }
+    transportSend(msg)
   }
 
   function handleServerMsg(msg: Record<string, unknown>) {
+    if (msg.t !== 'o' && msg.t !== 'pong') {
+      console.log('[oxmux] received:', msg.t, msg)
+    }
     switch (msg.t) {
       case 'o': {
-        // Raw PTY output
         const handler = paneHandlers.get(msg.pane as string)
         handler?.(msg.data as Uint8Array)
         break
       }
       case 's': {
-        // Full state dump
         sessions.value = (msg.sessions as TmuxSessionInfo[])
         break
       }
       case 'e': {
-        // Incremental tmux event
         applyTmuxEvent(msg.event as Record<string, unknown>)
         break
       }
       case 'c': {
-        // Structured Claude event
         const handler = claudeHandlers.get(msg.session_id as string)
         handler?.(msg.event)
         break
       }
       case 'ca': {
-        // Claude accumulator snapshot
         claudeSessions.value.set(
           msg.session_id as string,
           msg.state as ClaudeSessionState
@@ -170,12 +297,62 @@ export const useTmuxStore = defineStore('tmux', () => {
         break
       }
       case 'ice': {
-        // ICE config — resolve pending promise
         iceConfigResolvers.get(msg.peer_id as string)?.(msg.config as IceConfig)
         break
       }
       case 'pong': {
         lastPong.value = msg.ts as number
+        break
+      }
+
+      // ── Session management responses ──────────────────────────────
+      case 'sess_list': {
+        managedSessions.value = (msg.sessions as ManagedSession[]) ?? []
+        break
+      }
+      case 'sess_created': {
+        const session = msg.session as ManagedSession
+        managedSessions.value.push(session)
+        break
+      }
+      case 'sess_updated': {
+        const session = msg.session as ManagedSession
+        const idx = managedSessions.value.findIndex(s => s.id === session.id)
+        if (idx >= 0) managedSessions.value[idx] = session
+        break
+      }
+      case 'sess_deleted': {
+        const id = msg.session_id as string
+        managedSessions.value = managedSessions.value.filter(s => s.id !== id)
+        if (activeSessionId.value === id) {
+          activeSessionId.value = null
+          sessions.value = []
+        }
+        break
+      }
+      case 'sess_connected': {
+        const session = msg.session as ManagedSession
+        const idx = managedSessions.value.findIndex(s => s.id === session.id)
+        if (idx >= 0) managedSessions.value[idx] = session
+        // Update tmux tree from connected session
+        if (session.tmux_sessions?.length) {
+          sessions.value = session.tmux_sessions
+        }
+        activeSessionId.value = session.id
+        break
+      }
+      case 'sess_disconnected': {
+        const session = msg.session as ManagedSession
+        const idx = managedSessions.value.findIndex(s => s.id === session.id)
+        if (idx >= 0) managedSessions.value[idx] = session
+        if (activeSessionId.value === session.id) {
+          sessions.value = []
+          activePane.value = null
+        }
+        break
+      }
+      case 'err': {
+        console.error(`Server error [${msg.code}]: ${msg.message}`)
         break
       }
     }
@@ -189,8 +366,33 @@ export const useTmuxStore = defineStore('tmux', () => {
       case 'session_closed':
         sessions.value = sessions.value.filter(s => s.id !== event.id)
         break
-      // Additional events handled incrementally
     }
+  }
+
+  // ── Session CRUD ────────────────────────────────────────────────────
+
+  function createSession(name: string, transport: TransportConfig) {
+    sendMsg({ t: 'sess_create', name, transport })
+  }
+
+  function connectSession(sessionId: string) {
+    sendMsg({ t: 'sess_connect', session_id: sessionId })
+  }
+
+  function disconnectSession(sessionId: string) {
+    sendMsg({ t: 'sess_disconnect', session_id: sessionId })
+  }
+
+  function deleteSession(sessionId: string) {
+    sendMsg({ t: 'sess_delete', session_id: sessionId })
+  }
+
+  function refreshSession(sessionId: string) {
+    sendMsg({ t: 'sess_refresh', session_id: sessionId })
+  }
+
+  function listSessions() {
+    sendMsg({ t: 'sess_list' })
   }
 
   // Pane subscription
@@ -234,15 +436,27 @@ export const useTmuxStore = defineStore('tmux', () => {
   return {
     // State
     sessions,
+    managedSessions,
     activePane,
+    activeSessionId,
     claudeSessions,
     connectionStatus,
     allPanes,
     claudePanes,
     totalCostUsd,
     lastPong,
-    // Actions
+    showNewSessionDialog,
+    // Session CRUD
+    createSession,
+    connectSession,
+    disconnectSession,
+    deleteSession,
+    refreshSession,
+    listSessions,
+    // Pane actions
     connect,
+    connectQuic,
+    connectWebRtc: connectWebRtcTransport,
     subscribePane,
     unsubscribePane,
     sendInput,

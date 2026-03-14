@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::claude::parser::{ClaudeEvent, IceConfig, SessionAccumulator};
+use crate::claude::parser::{ClaudeEvent, SessionAccumulator};
+use crate::session::types::{CreateSessionRequest, ManagedSession, UpdateSessionRequest};
+use crate::webrtc::turn::IceConfig;
 
 /// Messages sent from server → browser
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,32 @@ pub enum ServerMsg {
     /// Pong response to client ping
     #[serde(rename = "pong")]
     Pong { ts: u64 },
+
+    // ── Session management responses ────────────────────────────────────
+
+    /// List of all managed sessions
+    #[serde(rename = "sess_list")]
+    SessionList { sessions: Vec<ManagedSession> },
+
+    /// A session was created
+    #[serde(rename = "sess_created")]
+    SessionCreated { session: ManagedSession },
+
+    /// A session was updated
+    #[serde(rename = "sess_updated")]
+    SessionUpdated { session: ManagedSession },
+
+    /// A session was deleted
+    #[serde(rename = "sess_deleted")]
+    SessionDeleted { session_id: String },
+
+    /// A session connected (includes tmux state)
+    #[serde(rename = "sess_connected")]
+    SessionConnected { session: ManagedSession },
+
+    /// A session disconnected
+    #[serde(rename = "sess_disconnected")]
+    SessionDisconnected { session: ManagedSession },
 }
 
 /// Messages sent from browser → server
@@ -83,6 +111,36 @@ pub enum ClientMsg {
     /// Ping (latency measurement)
     #[serde(rename = "ping")]
     Ping { ts: u64 },
+
+    // ── Session management commands ─────────────────────────────────────
+
+    /// Create a new session
+    #[serde(rename = "sess_create")]
+    CreateSession(CreateSessionRequest),
+
+    /// List all sessions
+    #[serde(rename = "sess_list")]
+    ListSessions,
+
+    /// Connect a session (start transport)
+    #[serde(rename = "sess_connect")]
+    ConnectSession { session_id: String },
+
+    /// Disconnect a session (stop transport, keep metadata)
+    #[serde(rename = "sess_disconnect")]
+    DisconnectSession { session_id: String },
+
+    /// Update session metadata (rename)
+    #[serde(rename = "sess_update")]
+    UpdateSession { session_id: String, #[serde(flatten)] request: UpdateSessionRequest },
+
+    /// Delete a session entirely
+    #[serde(rename = "sess_delete")]
+    DeleteSession { session_id: String },
+
+    /// Refresh tmux state for a session
+    #[serde(rename = "sess_refresh")]
+    RefreshSession { session_id: String },
 }
 
 /// tmux session/window/pane tree
@@ -97,7 +155,7 @@ pub struct TmuxSessionInfo {
 pub struct TmuxWindowInfo {
     pub id: String,
     pub name: String,
-    pub index: u32,
+    pub index: usize,
     pub layout: String,
     pub panes: Vec<TmuxPaneInfo>,
 }
@@ -105,7 +163,7 @@ pub struct TmuxWindowInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TmuxPaneInfo {
     pub id: String,
-    pub index: u32,
+    pub index: usize,
     pub cols: u16,
     pub rows: u16,
     pub current_command: String,
