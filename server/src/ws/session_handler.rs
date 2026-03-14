@@ -161,6 +161,116 @@ pub async fn handle_client_msg(
                 }),
             }
         }
+
+        // ── Agent management ────────────────────────────────────────
+
+        ClientMsg::AgentStatusRequest { host } => {
+            match state.agent_registry.find_by_host(&host) {
+                Some(agent) => Some(ServerMsg::AgentStatus {
+                    session_id: String::new(),
+                    host,
+                    status: "online".to_string(),
+                    agent_id: Some(agent.id),
+                    version: Some(agent.version),
+                    quic_port: Some(agent.quic_port),
+                }),
+                None => Some(ServerMsg::AgentStatus {
+                    session_id: String::new(),
+                    host,
+                    status: "not_installed".to_string(),
+                    agent_id: None,
+                    version: None,
+                    quic_port: None,
+                }),
+            }
+        }
+
+        ClientMsg::InstallAgent { session_id } => {
+            // Look up session to get SSH credentials and host
+            let session = match state.session_manager.get(&session_id) {
+                Some(s) => s,
+                None => return Some(ServerMsg::Error {
+                    code: "session_not_found".to_string(),
+                    message: format!("session '{}' not found", session_id),
+                }),
+            };
+
+            let (host, port, user, auth) = match &session.transport.backend {
+                crate::session::types::BackendTransport::Ssh { host, port, user, auth } => {
+                    (host.clone(), *port, user.clone(), auth.clone())
+                }
+                _ => return Some(ServerMsg::Error {
+                    code: "not_ssh_session".to_string(),
+                    message: "agent install requires an SSH session".to_string(),
+                }),
+            };
+
+            // TODO: spawn async deploy task and send progress updates
+            // For now, return a status message indicating it's not yet implemented
+            info!(host = %host, "agent install requested (async deploy needed)");
+
+            Some(ServerMsg::AgentStatus {
+                session_id,
+                host,
+                status: "install_requested".to_string(),
+                agent_id: None,
+                version: None,
+                quic_port: Some(4433),
+            })
+        }
+
+        ClientMsg::TransportUpgrade { session_id, target } => {
+            let session = match state.session_manager.get(&session_id) {
+                Some(s) => s,
+                None => return Some(ServerMsg::TransportUpgradeFailed {
+                    session_id,
+                    error: "session not found".to_string(),
+                }),
+            };
+
+            // Get the host from the session's backend transport
+            let host = match &session.transport.backend {
+                crate::session::types::BackendTransport::Ssh { host, .. } => host.clone(),
+                crate::session::types::BackendTransport::Agent { host, .. } => host.clone(),
+                _ => return Some(ServerMsg::TransportUpgradeFailed {
+                    session_id,
+                    error: "local sessions don't support P2P".to_string(),
+                }),
+            };
+
+            // Find agent for this host
+            let agent = match state.agent_registry.find_by_host(&host) {
+                Some(a) => a,
+                None => return Some(ServerMsg::TransportUpgradeFailed {
+                    session_id,
+                    error: format!("no agent online for host {}", host),
+                }),
+            };
+
+            // Issue short-lived token for browser→agent auth
+            use secrecy::ExposeSecret;
+            let secret = state.config.server.jwt_secret.expose_secret();
+            match crate::auth::jwt::create_agent_token(&agent.id, secret) {
+                Ok(token) => {
+                    info!(
+                        session_id = %session_id,
+                        target = %target,
+                        agent_id = %agent.id,
+                        "transport upgrade ready"
+                    );
+                    Some(ServerMsg::TransportUpgradeReady {
+                        session_id,
+                        agent_host: agent.host,
+                        agent_port: agent.quic_port,
+                        agent_token: token,
+                    })
+                }
+                Err(e) => Some(ServerMsg::TransportUpgradeFailed {
+                    session_id,
+                    error: e.to_string(),
+                }),
+            }
+        }
     }
 }
 

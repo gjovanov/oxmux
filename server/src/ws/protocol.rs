@@ -70,6 +70,38 @@ pub enum ServerMsg {
     /// A session disconnected
     #[serde(rename = "sess_disconnected")]
     SessionDisconnected { session: ManagedSession },
+
+    // ── Agent management responses ──────────────────────────────────────
+
+    /// Agent status update (not_installed, installing, starting, online, error)
+    #[serde(rename = "agent_status")]
+    AgentStatus {
+        session_id: String,
+        host: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quic_port: Option<u16>,
+    },
+
+    /// Transport upgrade ready — browser can now connect P2P
+    #[serde(rename = "transport_upgrade_ready")]
+    TransportUpgradeReady {
+        session_id: String,
+        agent_host: String,
+        agent_port: u16,
+        agent_token: String,
+    },
+
+    /// Transport upgrade failed
+    #[serde(rename = "transport_upgrade_failed")]
+    TransportUpgradeFailed {
+        session_id: String,
+        error: String,
+    },
 }
 
 /// Messages sent from browser → server
@@ -141,6 +173,20 @@ pub enum ClientMsg {
     /// Refresh tmux state for a session
     #[serde(rename = "sess_refresh")]
     RefreshSession { session_id: String },
+
+    // ── Agent management ────────────────────────────────────────────────
+
+    /// Install agent on the host of a connected SSH session
+    #[serde(rename = "agent_install")]
+    InstallAgent { session_id: String },
+
+    /// Request transport upgrade from SSH to P2P
+    #[serde(rename = "transport_upgrade")]
+    TransportUpgrade { session_id: String, target: String },
+
+    /// Check agent status for a host
+    #[serde(rename = "agent_status")]
+    AgentStatusRequest { host: String },
 }
 
 /// tmux session/window/pane tree

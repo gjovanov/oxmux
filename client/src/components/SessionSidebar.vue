@@ -57,6 +57,45 @@
 
         <div v-if="ms.error" class="ms-error">{{ ms.error }}</div>
 
+        <!-- Agent section (only for SSH sessions that are connected) -->
+        <div v-if="ms.status === 'connected' && ms.transport.backend?.type === 'ssh'" class="agent-section">
+          <template v-if="getAgentStatus(ms) === 'online'">
+            <div class="agent-online">
+              <span class="agent-dot online"></span> Agent online
+              <span class="agent-version">v{{ getAgentVersion(ms) }}</span>
+            </div>
+            <div class="transport-switch">
+              <span class="current-transport">{{ store.activeTransportMode }}</span>
+              <button
+                v-if="store.activeTransportMode === 'ssh'"
+                class="action-btn p2p"
+                @click="store.upgradeTransport(ms.id, 'quic_p2p')"
+              >QUIC P2P</button>
+              <button
+                v-if="store.activeTransportMode === 'ssh'"
+                class="action-btn p2p"
+                @click="store.upgradeTransport(ms.id, 'webrtc_p2p')"
+              >WebRTC P2P</button>
+              <button
+                v-if="store.activeTransportMode !== 'ssh'"
+                class="action-btn disconnect"
+                @click="store.activeTransportMode = 'ssh'"
+              >Back to SSH</button>
+            </div>
+          </template>
+          <template v-else-if="getAgentStatus(ms) === 'installing'">
+            <div class="agent-installing">
+              <span class="agent-dot installing"></span> Installing agent...
+            </div>
+          </template>
+          <template v-else>
+            <div class="agent-not-installed">
+              <span class="agent-dot offline"></span> No agent
+              <button class="action-btn install" @click="store.installAgent(ms.id)">Install</button>
+            </div>
+          </template>
+        </div>
+
         <!-- tmux tree for connected session -->
         <template v-if="ms.status === 'connected' && store.activeSessionId === ms.id">
           <div
@@ -122,6 +161,18 @@ const statusLabel = computed(() => ({
 
 function selectPane(paneId: string) {
   store.activePane = paneId
+}
+
+function getAgentStatus(ms: any): string {
+  const host = ms.transport?.backend?.host
+  if (!host) return 'not_installed'
+  return store.agentStatuses.get(host)?.status || 'not_installed'
+}
+
+function getAgentVersion(ms: any): string {
+  const host = ms.transport?.backend?.host
+  if (!host) return ''
+  return store.agentStatuses.get(host)?.version || ''
 }
 
 function claudeCost(paneId: string): string {
@@ -241,5 +292,22 @@ function claudeCost(paneId: string): string {
 .pane-cmd { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-size { color: #45475a; font-size: 10px; }
 .pane-cost { color: #f9e2af; font-size: 10px; }
+/* Agent section */
+.agent-section { margin-top: 6px; padding: 6px 8px; background: #11111b; border-radius: 4px; }
+.agent-online, .agent-not-installed, .agent-installing {
+  display: flex; align-items: center; gap: 6px; font-size: 10px; color: #a6adc8;
+}
+.agent-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.agent-dot.online { background: #a6e3a1; }
+.agent-dot.offline { background: #585b70; }
+.agent-dot.installing { background: #f9e2af; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+.agent-version { color: #585b70; margin-left: auto; }
+.transport-switch { display: flex; gap: 4px; margin-top: 4px; align-items: center; }
+.current-transport { font-size: 9px; color: #585b70; text-transform: uppercase; }
+.action-btn.p2p { background: #cba6f7; color: #1e1e2e; }
+.action-btn.p2p:hover { background: #b4befe; }
+.action-btn.install { background: #89b4fa; color: #1e1e2e; margin-left: auto; }
+
 .empty-state { padding: 20px 12px; color: #45475a; text-align: center; line-height: 1.6; }
 </style>

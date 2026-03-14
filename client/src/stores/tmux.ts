@@ -114,6 +114,8 @@ export const useTmuxStore = defineStore('tmux', () => {
   const connectionStatus = ref<'disconnected' | 'connecting' | 'connected' | 'reconnecting'>('disconnected')
   const ws = ref<WebSocket | null>(null)
   const showNewSessionDialog = ref(false)
+  const agentStatuses = ref<Map<string, { status: string; agentId?: string; version?: string; quicPort?: number }>>(new Map())
+  const activeTransportMode = ref<'ssh' | 'quic_p2p' | 'webrtc_p2p'>('ssh')
 
   // pane_id → output handler (registered by TerminalPane components)
   const paneHandlers = new Map<string, PaneOutputHandler>()
@@ -355,6 +357,32 @@ export const useTmuxStore = defineStore('tmux', () => {
         console.error(`Server error [${msg.code}]: ${msg.message}`)
         break
       }
+
+      // ── Agent management ──────────────────────────────────────────
+      case 'agent_status': {
+        const host = msg.host as string
+        agentStatuses.value.set(host, {
+          status: msg.status as string,
+          agentId: msg.agent_id as string | undefined,
+          version: msg.version as string | undefined,
+          quicPort: msg.quic_port as number | undefined,
+        })
+        break
+      }
+      case 'transport_upgrade_ready': {
+        const sid = msg.session_id as string
+        const token = msg.agent_token as string
+        const host = msg.agent_host as string
+        const port = msg.agent_port as number
+        console.log(`[oxmux] transport upgrade ready: ${host}:${port}`)
+        // Auto-connect P2P (QUIC)
+        connectQuicP2P(host, port, token)
+        break
+      }
+      case 'transport_upgrade_failed': {
+        console.error(`[oxmux] transport upgrade failed: ${msg.error}`)
+        break
+      }
     }
   }
 
@@ -433,6 +461,48 @@ export const useTmuxStore = defineStore('tmux', () => {
     sendMsg({ t: 'ping', ts: Date.now() })
   }
 
+  // ── Agent management ────────────────────────────────────────────────
+
+  function checkAgentStatus(host: string) {
+    sendMsg({ t: 'agent_status', host })
+  }
+
+  function installAgent(sessionId: string) {
+    sendMsg({ t: 'agent_install', session_id: sessionId })
+  }
+
+  function upgradeTransport(sessionId: string, target: 'quic_p2p' | 'webrtc_p2p') {
+    sendMsg({ t: 'transport_upgrade', session_id: sessionId, target })
+  }
+
+  /** Connect directly to agent via QUIC (P2P). */
+  async function connectQuicP2P(host: string, port: number, token: string) {
+    const { connectQuic: doConnect } = await import('@/composables/useQuic')
+
+    try {
+      const url = `https://${host}:${port}`
+      console.log(`[oxmux] connecting QUIC P2P to ${url}`)
+      const conn = await doConnect(url, token)
+
+      // Switch transport to P2P for pane I/O
+      transportSend = (msg) => conn.send(msg)
+      transportClose = () => conn.close()
+      activeTransportMode.value = 'quic_p2p'
+
+      conn.onMessage((msg) => handleServerMsg(msg))
+      conn.onClose(() => {
+        console.warn('[oxmux] P2P connection lost, falling back to SSH')
+        activeTransportMode.value = 'ssh'
+        // WS connection is still alive for management
+      })
+
+      console.log('[oxmux] QUIC P2P connected!')
+    } catch (e) {
+      console.error('[oxmux] QUIC P2P failed:', e)
+      activeTransportMode.value = 'ssh'
+    }
+  }
+
   return {
     // State
     sessions,
@@ -446,6 +516,8 @@ export const useTmuxStore = defineStore('tmux', () => {
     totalCostUsd,
     lastPong,
     showNewSessionDialog,
+    agentStatuses,
+    activeTransportMode,
     // Session CRUD
     createSession,
     connectSession,
@@ -464,5 +536,9 @@ export const useTmuxStore = defineStore('tmux', () => {
     requestIceConfig,
     subscribeClaudeSession,
     ping,
+    // Agent management
+    checkAgentStatus,
+    installAgent,
+    upgradeTransport,
   }
 })

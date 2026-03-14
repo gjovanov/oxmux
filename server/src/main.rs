@@ -76,6 +76,10 @@ async fn main() -> Result<()> {
         .route("/api/auth/me", get(auth::handler::me))
         // WebSocket (authenticated via ?token=)
         .route("/ws", get(ws::handler::ws_handler))
+        // Agent management
+        .route("/api/agents", get(agent::handler::list_agents))
+        .route("/api/agents/:host/status", get(agent::handler::agent_status))
+        .route("/api/agents/:agent_id/token", post(agent::handler::agent_token))
         // Public
         .route("/api/ice-config", get(ws::handler::ice_config_handler))
         .route("/health", get(|| async { "ok" }))

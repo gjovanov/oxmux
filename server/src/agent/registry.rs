@@ -43,6 +43,13 @@ impl AgentRegistry {
         self.agents.get(id).map(|e| e.value().clone())
     }
 
+    pub fn find_by_host(&self, host: &str) -> Option<AgentInfo> {
+        self.agents
+            .iter()
+            .find(|e| e.value().host == host)
+            .map(|e| e.value().clone())
+    }
+
     pub fn is_online(&self, id: &str) -> bool {
         self.agents.contains_key(id)
     }
