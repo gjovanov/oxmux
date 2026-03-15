@@ -336,11 +336,15 @@ export const useTmuxStore = defineStore('tmux', () => {
         const session = msg.session as ManagedSession
         const idx = managedSessions.value.findIndex(s => s.id === session.id)
         if (idx >= 0) managedSessions.value[idx] = session
-        // Update tmux tree from connected session
         if (session.tmux_sessions?.length) {
           sessions.value = session.tmux_sessions
         }
         activeSessionId.value = session.id
+        // Auto-check agent status for SSH sessions
+        const host = (session.transport?.backend as any)?.host
+        if (host && session.transport?.backend?.type === 'ssh') {
+          checkAgentStatus(host)
+        }
         break
       }
       case 'sess_disconnected': {

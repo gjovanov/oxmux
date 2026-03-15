@@ -1,5 +1,5 @@
 <template>
-  <div class="dialog-overlay" @click.self="close">
+  <div class="dialog-overlay">
     <div class="dialog">
       <div class="dialog-header">
         <h3>New Session</h3>

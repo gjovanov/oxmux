@@ -169,24 +169,55 @@ pub async fn handle_client_msg(
         // ── Agent management ────────────────────────────────────────
 
         ClientMsg::AgentStatusRequest { host } => {
-            match state.agent_registry.find_by_host(&host) {
-                Some(agent) => Some(ServerMsg::AgentStatus {
+            // Check registry first
+            if let Some(agent) = state.agent_registry.find_by_host(&host) {
+                return Some(ServerMsg::AgentStatus {
                     session_id: String::new(),
                     host,
                     status: "online".to_string(),
                     agent_id: Some(agent.id),
                     version: Some(agent.version),
                     quic_port: Some(agent.quic_port),
-                }),
-                None => Some(ServerMsg::AgentStatus {
-                    session_id: String::new(),
-                    host,
-                    status: "not_installed".to_string(),
-                    agent_id: None,
-                    version: None,
-                    quic_port: None,
-                }),
+                });
             }
+
+            // Not in registry — probe QUIC port to check if agent exists
+            let host_clone = host.clone();
+            let async_tx = conn.async_sender.clone();
+            tokio::spawn(async move {
+                match crate::agent::probe::probe_agent(&host_clone, 4433).await {
+                    Ok(true) => {
+                        let _ = async_tx.send(ServerMsg::AgentStatus {
+                            session_id: String::new(),
+                            host: host_clone,
+                            status: "online".to_string(),
+                            agent_id: None,
+                            version: None,
+                            quic_port: Some(4433),
+                        }).await;
+                    }
+                    _ => {
+                        let _ = async_tx.send(ServerMsg::AgentStatus {
+                            session_id: String::new(),
+                            host: host_clone,
+                            status: "not_installed".to_string(),
+                            agent_id: None,
+                            version: None,
+                            quic_port: None,
+                        }).await;
+                    }
+                }
+            });
+
+            // Immediate response while probe runs
+            Some(ServerMsg::AgentStatus {
+                session_id: String::new(),
+                host,
+                status: "checking".to_string(),
+                agent_id: None,
+                version: None,
+                quic_port: None,
+            })
         }
 
         ClientMsg::InstallAgent { session_id } => {
@@ -212,6 +243,7 @@ pub async fn handle_client_msg(
             let async_tx = conn.async_sender.clone();
             let session_id_clone = session_id.clone();
             let host_clone = host.clone();
+            let state_clone = state.clone();
 
             // Spawn background deploy task
             tokio::spawn(async move {
@@ -275,15 +307,67 @@ pub async fn handle_client_msg(
 
                 match deploy_result {
                     Ok(result) => {
-                        info!(host = %host_clone, "agent deployed successfully");
+                        info!(host = %host_clone, "agent deployed, probing...");
                         let _ = async_tx.send(ServerMsg::AgentStatus {
-                            session_id: session_id_clone,
-                            host: host_clone,
+                            session_id: session_id_clone.clone(),
+                            host: host_clone.clone(),
                             status: "starting".to_string(),
                             agent_id: None,
                             version: Some("0.1.0".to_string()),
                             quic_port: Some(result.quic_port),
                         }).await;
+
+                        // Probe agent with retries (may take a moment to start)
+                        let mut online = false;
+                        for attempt in 1..=6 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            match crate::agent::probe::probe_agent(&host_clone, result.quic_port).await {
+                                Ok(true) => {
+                                    online = true;
+                                    info!(host = %host_clone, attempt, "agent is online");
+                                    break;
+                                }
+                                _ => {
+                                    debug!(host = %host_clone, attempt, "agent not ready yet");
+                                }
+                            }
+                        }
+
+                        if online {
+                            let agent_id = uuid::Uuid::new_v4().to_string();
+
+                            // Register in agent registry
+                            state_clone.agent_registry.register(crate::agent::registry::AgentInfo {
+                                id: agent_id.clone(),
+                                hostname: host_clone.clone(),
+                                host: host_clone.clone(),
+                                quic_port: result.quic_port,
+                                version: "0.1.0".to_string(),
+                                last_seen: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            });
+
+                            let _ = async_tx.send(ServerMsg::AgentStatus {
+                                session_id: session_id_clone,
+                                host: host_clone,
+                                status: "online".to_string(),
+                                agent_id: Some(agent_id),
+                                version: Some("0.1.0".to_string()),
+                                quic_port: Some(result.quic_port),
+                            }).await;
+                        } else {
+                            warn!(host = %host_clone, "agent started but not responding to QUIC probe");
+                            let _ = async_tx.send(ServerMsg::AgentStatus {
+                                session_id: session_id_clone,
+                                host: host_clone,
+                                status: "error".to_string(),
+                                agent_id: None,
+                                version: None,
+                                quic_port: Some(result.quic_port),
+                            }).await;
+                        }
                     }
                     Err(e) => {
                         warn!(host = %host_clone, error = %e, "agent deploy failed");

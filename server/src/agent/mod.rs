@@ -1,6 +1,7 @@
 pub mod binary;
 pub mod deployer;
 pub mod handler;
+pub mod probe;
 pub mod registry;
 
 /// SSH handler for agent deployment (accepts all host keys).
