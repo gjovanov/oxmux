@@ -178,9 +178,27 @@ async fn handle_message(
         }
 
         "sub" => {
-            let pane = msg.get("pane").and_then(|v| v.as_str()).unwrap_or("");
-            let _ = tmux_mgr.get_or_create_pane_channel(pane);
+            let pane = msg.get("pane").and_then(|v| v.as_str()).unwrap_or("").to_string();
             info!(pane = %pane, "client subscribed to pane");
+
+            // Start capturing pane output via tmux capture-pane polling
+            // (control mode would be better but this is simpler for P2P)
+            let pane_clone = pane.clone();
+            let send_clone = send as *mut wtransport::SendStream;
+            // We can't easily share the send stream, so for now just send initial capture
+            let capture = std::process::Command::new("tmux")
+                .args(["capture-pane", "-t", &pane, "-p", "-e"])
+                .output();
+            if let Ok(output) = capture {
+                if output.status.success() && !output.stdout.is_empty() {
+                    let reply = serde_json::json!({
+                        "t": "o",
+                        "pane": pane,
+                        "data": output.stdout,
+                    });
+                    let _ = send_response(send, &reply).await;
+                }
+            }
         }
 
         "i" => {
@@ -190,10 +208,36 @@ async fn handle_message(
                     arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
                 } else if let Some(s) = data.as_str() {
                     s.as_bytes().to_vec()
+                } else if data.is_object() {
+                    // MessagePack Binary type decoded as {"type": "Buffer", "data": [...]}
+                    if let Some(arr) = data.get("data").and_then(|d| d.as_array()) {
+                        arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
+                    } else {
+                        vec![]
+                    }
                 } else {
-                    vec![]
+                    // Try to get raw bytes from serde_json Value
+                    serde_json::to_vec(data).unwrap_or_default()
                 };
-                let _ = tmux_mgr.send_input(pane, &bytes);
+                if !bytes.is_empty() {
+                    info!(pane = %pane, bytes = bytes.len(), "sending input");
+                    let _ = tmux_mgr.send_input(pane, &bytes);
+
+                    // After input, capture and send updated output
+                    let capture = std::process::Command::new("tmux")
+                        .args(["capture-pane", "-t", pane, "-p", "-e"])
+                        .output();
+                    if let Ok(output) = capture {
+                        if output.status.success() && !output.stdout.is_empty() {
+                            let reply = serde_json::json!({
+                                "t": "o",
+                                "pane": pane,
+                                "data": output.stdout,
+                            });
+                            let _ = send_response(send, &reply).await;
+                        }
+                    }
+                }
             }
         }
 

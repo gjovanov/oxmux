@@ -497,10 +497,15 @@ export const useTmuxStore = defineStore('tmux', () => {
       conn.onClose(() => {
         console.warn('[oxmux] P2P connection lost, falling back to SSH')
         activeTransportMode.value = 'ssh'
-        // WS connection is still alive for management
       })
 
       console.log('[oxmux] QUIC P2P connected!')
+
+      // Re-subscribe all active panes on the new transport
+      for (const paneId of paneHandlers.keys()) {
+        console.log('[oxmux] re-subscribing pane on P2P:', paneId)
+        sendMsg({ t: 'sub', pane: paneId })
+      }
     } catch (e) {
       console.error('[oxmux] QUIC P2P failed:', e)
       activeTransportMode.value = 'ssh'
