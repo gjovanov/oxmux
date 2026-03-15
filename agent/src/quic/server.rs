@@ -144,19 +144,48 @@ async fn handle_message(
     tmux_mgr: &TmuxManager,
     send: &mut wtransport::SendStream,
 ) -> Result<()> {
-    let msg: serde_json::Value = rmp_serde::from_slice(data)
+    let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])
         .with_context(|| format!(
             "failed to decode message ({} bytes, first: {:?})",
             data.len(), &data[..data.len().min(20)]
         ))?;
 
-    let t = msg.get("t").and_then(|v| v.as_str()).unwrap_or("");
+    let t = msg.as_map()
+        .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("t")))
+        .and_then(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    // Helper to extract string field
+    let get_str = |key: &str| -> &str {
+        msg.as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
+            .and_then(|(_, v)| v.as_str())
+            .unwrap_or("")
+    };
+
+    // Helper to extract binary/bytes field
+    let get_bytes = |key: &str| -> Vec<u8> {
+        msg.as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
+            .map(|(_, v)| match v {
+                rmpv::Value::Binary(b) => b.clone(),
+                rmpv::Value::String(s) => s.as_bytes().to_vec(),
+                _ => vec![],
+            })
+            .unwrap_or_default()
+    };
+
+    let get_u64 = |key: &str| -> u64 {
+        msg.as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
+            .and_then(|(_, v)| v.as_u64())
+            .unwrap_or(0)
+    };
 
     match t {
         "sess_connect" | "sess_create" => {
-            let name = msg.get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default");
+            let name = get_str("name");
+            let name = if name.is_empty() { "default" } else { name };
 
             tmux_mgr.ensure_session(name)?;
             let panes = tmux_mgr.list_panes(name)?;
@@ -178,7 +207,7 @@ async fn handle_message(
         }
 
         "sub" => {
-            let pane = msg.get("pane").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let pane = get_str("pane").to_string();
             info!(pane = %pane, "client subscribed to pane");
 
             // Start capturing pane output via tmux capture-pane polling
@@ -202,54 +231,40 @@ async fn handle_message(
         }
 
         "i" => {
-            let pane = msg.get("pane").and_then(|v| v.as_str()).unwrap_or("");
-            if let Some(data) = msg.get("data") {
-                let bytes: Vec<u8> = if let Some(arr) = data.as_array() {
-                    arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
-                } else if let Some(s) = data.as_str() {
-                    s.as_bytes().to_vec()
-                } else if data.is_object() {
-                    // MessagePack Binary type decoded as {"type": "Buffer", "data": [...]}
-                    if let Some(arr) = data.get("data").and_then(|d| d.as_array()) {
-                        arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    // Try to get raw bytes from serde_json Value
-                    serde_json::to_vec(data).unwrap_or_default()
-                };
-                if !bytes.is_empty() {
-                    info!(pane = %pane, bytes = bytes.len(), "sending input");
-                    let _ = tmux_mgr.send_input(pane, &bytes);
+            let pane = get_str("pane");
+            let bytes = get_bytes("data");
+            if !bytes.is_empty() && !pane.is_empty() {
+                info!(pane = %pane, bytes = bytes.len(), "sending input");
+                let _ = tmux_mgr.send_input(pane, &bytes);
 
-                    // After input, capture and send updated output
-                    let capture = std::process::Command::new("tmux")
-                        .args(["capture-pane", "-t", pane, "-p", "-e"])
-                        .output();
-                    if let Ok(output) = capture {
-                        if output.status.success() && !output.stdout.is_empty() {
-                            let reply = serde_json::json!({
-                                "t": "o",
-                                "pane": pane,
-                                "data": output.stdout,
-                            });
-                            let _ = send_response(send, &reply).await;
-                        }
+                // After input, capture and send updated output
+                if let Ok(output) = std::process::Command::new("tmux")
+                    .args(["capture-pane", "-t", pane, "-p", "-e"])
+                    .output()
+                {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        let reply = serde_json::json!({
+                            "t": "o",
+                            "pane": pane,
+                            "data": output.stdout,
+                        });
+                        let _ = send_response(send, &reply).await;
                     }
                 }
             }
         }
 
         "r" => {
-            let pane = msg.get("pane").and_then(|v| v.as_str()).unwrap_or("");
-            let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-            let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            let pane = get_str("pane");
+            let cols = get_u64("cols") as u16;
+            let rows = get_u64("rows") as u16;
+            let cols = if cols == 0 { 80 } else { cols };
+            let rows = if rows == 0 { 24 } else { rows };
             let _ = tmux_mgr.resize_pane(pane, cols, rows);
         }
 
         "ping" => {
-            let ts = msg.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ts = get_u64("ts");
             let reply = serde_json::json!({"t": "pong", "ts": ts});
             send_response(send, &reply).await?;
         }
