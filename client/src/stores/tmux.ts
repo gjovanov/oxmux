@@ -226,6 +226,9 @@ export const useTmuxStore = defineStore('tmux', () => {
       console.log('[oxmux] opening QUIC signaling channel for WebRTC')
       const quicConn = await doQuic(quicUrl, token)
 
+      // Keep QUIC alive during WebRTC negotiation
+      const keepAlive = setInterval(() => quicConn.send({ t: 'ping', ts: Date.now() }), 5000)
+
       // Set up signaling handlers via QUIC
       const signalResolvers = new Map<string, (payload: Record<string, unknown>) => void>()
 
@@ -244,9 +247,16 @@ export const useTmuxStore = defineStore('tmux', () => {
         }
       })
 
-      // Request ICE config from server
+      // Request ICE config from server (snake_case → camelCase)
       const iceRes = await fetch(`/api/ice-config?user=webrtc`)
-      const iceConfig = await iceRes.json()
+      const raw = await iceRes.json()
+      const iceConfig = {
+        iceServers: (raw.ice_servers || []).map((s: any) => ({
+          urls: s.urls,
+          username: s.username,
+          credential: s.credential,
+        })),
+      }
 
       const conn = await connectWebRtc(
         iceConfig,
@@ -266,7 +276,7 @@ export const useTmuxStore = defineStore('tmux', () => {
       connectionStatus.value = 'connected'
       backoffMs = 1000
       transportSend = (msg) => conn.send(msg)
-      transportClose = () => { conn.close(); quicConn.close() }
+      transportClose = () => { clearInterval(keepAlive); conn.close(); quicConn.close() }
       activeTransportMode.value = 'webrtc_p2p'
 
       conn.onMessage((msg) => handleServerMsg(msg))
@@ -283,7 +293,6 @@ export const useTmuxStore = defineStore('tmux', () => {
       }
     } catch (e) {
       console.error('[oxmux] WebRTC P2P failed:', e)
-      connectionStatus.value = 'disconnected'
       activeTransportMode.value = 'ssh'
     }
   }
