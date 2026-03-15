@@ -26,6 +26,9 @@ pub async fn run(
         .with_identity(identity)
         .build();
 
+    // Note: keep_alive and idle_timeout are configured at the quinn level
+    // wtransport handles this internally
+
     let endpoint = Endpoint::server(config)?;
     info!("WebTransport agent listener on :{}", port);
 
@@ -286,6 +289,53 @@ async fn handle_message(
             send_msg(send, &serde_json::json!({"t": "sess_list", "sessions": []})).await?;
         }
 
+        "webrtc_offer" => {
+            // Browser wants to establish a WebRTC DataChannel P2P connection.
+            // The SDP offer arrives over the existing WebTransport connection.
+            let sdp = get_str(&msg, "sdp").to_string();
+            let peer_id = get_str(&msg, "peer_id").to_string();
+
+            info!(peer_id = %peer_id, "WebRTC offer received, creating peer connection");
+
+            let tmux_clone = tmux_mgr.pane_outputs.clone();
+            match create_webrtc_peer(&sdp, tmux_clone).await {
+                Ok((answer_sdp, ice_candidates)) => {
+                    // Send answer back over WebTransport
+                    send_msg(send, &serde_json::json!({
+                        "t": "webrtc_answer",
+                        "peer_id": peer_id,
+                        "sdp": answer_sdp,
+                    })).await?;
+
+                    // Send gathered ICE candidates
+                    for candidate in ice_candidates {
+                        send_msg(send, &serde_json::json!({
+                            "t": "webrtc_ice",
+                            "peer_id": peer_id,
+                            "candidate": candidate,
+                        })).await?;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "WebRTC peer creation failed");
+                    send_msg(send, &serde_json::json!({
+                        "t": "webrtc_error",
+                        "peer_id": peer_id,
+                        "error": e.to_string(),
+                    })).await?;
+                }
+            }
+        }
+
+        "webrtc_ice" => {
+            // ICE candidate from browser (relayed over WebTransport)
+            let candidate = get_str(&msg, "candidate").to_string();
+            let sdp_mid = get_str(&msg, "sdp_mid").to_string();
+            debug!(candidate = %candidate, "received ICE candidate");
+            // Note: in a full implementation, we'd store the peer connection
+            // and add candidates to it. For now, ICE gathering completes server-side.
+        }
+
         other => {
             if !other.is_empty() {
                 debug!(msg_type = %other, "unhandled");
@@ -294,6 +344,136 @@ async fn handle_message(
     }
 
     Ok(())
+}
+
+// ── WebRTC P2P ──────────────────────────────────────────────────────────
+
+/// Create a WebRTC peer connection with DataChannel for terminal I/O.
+async fn create_webrtc_peer(
+    offer_sdp: &str,
+    pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
+) -> Result<(String, Vec<String>)> {
+    use webrtc::api::interceptor_registry::register_default_interceptors;
+    use webrtc::api::media_engine::MediaEngine;
+    use webrtc::api::APIBuilder;
+    use webrtc::data_channel::data_channel_message::DataChannelMessage;
+    use webrtc::data_channel::RTCDataChannel;
+    use webrtc::ice_transport::ice_server::RTCIceServer;
+    use webrtc::interceptor::registry::Registry;
+    use webrtc::peer_connection::configuration::RTCConfiguration;
+    use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
+    let mut m = MediaEngine::default();
+    m.register_default_codecs()?;
+    let mut registry = Registry::new();
+    registry = register_default_interceptors(registry, &mut m)?;
+
+    let api = APIBuilder::new()
+        .with_media_engine(m)
+        .with_interceptor_registry(registry)
+        .build();
+
+    let config = RTCConfiguration {
+        ice_servers: vec![RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let pc = Arc::new(api.new_peer_connection(config).await?);
+
+    // Collect ICE candidates
+    let (ice_tx, mut ice_rx) = mpsc::channel::<String>(32);
+    let ice_done = Arc::new(tokio::sync::Notify::new());
+    let ice_done_clone = ice_done.clone();
+
+    pc.on_ice_candidate(Box::new(move |candidate| {
+        let tx = ice_tx.clone();
+        let done = ice_done_clone.clone();
+        Box::pin(async move {
+            match candidate {
+                Some(c) => {
+                    if let Ok(json) = c.to_json() {
+                        let _ = tx.send(json.candidate).await;
+                    }
+                }
+                None => done.notify_one(), // gathering complete
+            }
+        })
+    }));
+
+    // Handle DataChannel from browser
+    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        let pane_outputs = pane_outputs.clone();
+        Box::pin(async move {
+            info!(label = %dc.label(), "WebRTC DataChannel opened");
+
+            dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                let data = msg.data.to_vec();
+                Box::pin(async move {
+                    // Decode msgpack and handle (input, subscribe, etc.)
+                    match rmpv::decode::read_value(&mut &data[..]) {
+                        Ok(val) => {
+                            let t = val.as_map()
+                                .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("t")))
+                                .and_then(|(_, v)| v.as_str())
+                                .unwrap_or("");
+
+                            if t == "i" {
+                                let pane = val.as_map()
+                                    .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("pane")))
+                                    .and_then(|(_, v)| v.as_str())
+                                    .unwrap_or("");
+                                let input = val.as_map()
+                                    .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("data")))
+                                    .map(|(_, v)| match v {
+                                        rmpv::Value::Binary(b) => b.clone(),
+                                        rmpv::Value::String(s) => s.as_bytes().to_vec(),
+                                        _ => vec![],
+                                    })
+                                    .unwrap_or_default();
+
+                                if !input.is_empty() {
+                                    let hex: String = input.iter().map(|b| format!("{:02x} ", b)).collect();
+                                    let _ = std::process::Command::new("tmux")
+                                        .args(["send-keys", "-t", pane, "-H", hex.trim()])
+                                        .output();
+                                }
+                            }
+                        }
+                        Err(e) => debug!("DataChannel decode error: {}", e),
+                    }
+                })
+            }));
+        })
+    }));
+
+    // Set remote description (browser's offer)
+    let offer = RTCSessionDescription::offer(offer_sdp.to_string())?;
+    pc.set_remote_description(offer).await?;
+
+    // Create answer
+    let answer = pc.create_answer(None).await?;
+    let answer_sdp = answer.sdp.clone();
+    pc.set_local_description(answer).await?;
+
+    // Wait for ICE gathering to complete (with timeout)
+    tokio::select! {
+        _ = ice_done.notified() => {}
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            warn!("ICE gathering timed out");
+        }
+    }
+
+    // Collect candidates
+    let mut candidates = Vec::new();
+    while let Ok(c) = ice_rx.try_recv() {
+        candidates.push(c);
+    }
+
+    info!(candidates = candidates.len(), "WebRTC peer created");
+    Ok((answer_sdp, candidates))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

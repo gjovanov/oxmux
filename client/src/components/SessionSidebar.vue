@@ -74,7 +74,7 @@
               <button
                 v-if="store.activeTransportMode === 'ssh'"
                 class="action-btn p2p"
-                @click="store.upgradeTransport(ms.id, 'webrtc_p2p')"
+                @click="connectWebRtcP2P(ms)"
               >WebRTC P2P</button>
               <button
                 v-if="store.activeTransportMode !== 'ssh'"
@@ -173,6 +173,12 @@ function getAgentVersion(ms: any): string {
   const host = ms.transport?.backend?.host
   if (!host) return ''
   return store.agentStatuses.get(host)?.version || ''
+}
+
+async function connectWebRtcP2P(ms: any) {
+  // Request agent token + info via transport upgrade
+  store.upgradeTransport(ms.id, 'webrtc_p2p')
+  // The transport_upgrade_ready response will trigger connectWebRtcTransport
 }
 
 function claudeCost(paneId: string): string {

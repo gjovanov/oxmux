@@ -212,43 +212,79 @@ export const useTmuxStore = defineStore('tmux', () => {
   }
 
   /**
-   * Connect via WebRTC DataChannel.
-   * Requires an existing WS connection for signaling.
+   * Connect via WebRTC DataChannel to agent.
+   * Uses existing QUIC P2P connection for signaling (SDP/ICE exchange).
    */
-  async function connectWebRtcTransport(iceConfig: any) {
+  async function connectWebRtcTransport(agentHost: string, agentPort: number, token: string) {
     const { connectWebRtc } = await import('@/composables/useWebRtc')
+    const { connectQuic: doQuic } = await import('@/composables/useQuic')
 
     connectionStatus.value = 'connecting'
     try {
-      // Signal handlers — route via existing WS
-      const signalHandlers: ((payload: Record<string, unknown>) => void)[] = []
+      // First establish a QUIC connection for signaling
+      const quicUrl = `https://${agentHost}:${agentPort}`
+      console.log('[oxmux] opening QUIC signaling channel for WebRTC')
+      const quicConn = await doQuic(quicUrl, token)
+
+      // Set up signaling handlers via QUIC
+      const signalResolvers = new Map<string, (payload: Record<string, unknown>) => void>()
+
+      quicConn.onMessage((msg) => {
+        if (msg.t === 'webrtc_answer' || msg.t === 'webrtc_ice') {
+          const handler = signalResolvers.get('signal')
+          if (handler) {
+            if (msg.t === 'webrtc_answer') {
+              handler({ type: 'answer', sdp: msg.sdp })
+            } else if (msg.t === 'webrtc_ice') {
+              handler({ type: 'ice_candidate', candidate: msg.candidate, sdp_mid: '0' })
+            }
+          }
+        } else {
+          handleServerMsg(msg)
+        }
+      })
+
+      // Request ICE config from server
+      const iceRes = await fetch(`/api/ice-config?user=webrtc`)
+      const iceConfig = await iceRes.json()
 
       const conn = await connectWebRtc(
         iceConfig,
         (payload) => {
-          // Send signaling via WS
-          sendMsg({ t: 'sig', peer_id: 'server', payload })
+          // Send signaling via QUIC to agent
+          if (payload.type === 'offer') {
+            quicConn.send({ t: 'webrtc_offer', peer_id: 'browser', sdp: payload.sdp })
+          } else if (payload.type === 'ice_candidate') {
+            quicConn.send({ t: 'webrtc_ice', peer_id: 'browser', candidate: payload.candidate })
+          }
         },
         (handler) => {
-          signalHandlers.push(handler)
+          signalResolvers.set('signal', handler)
         },
       )
 
       connectionStatus.value = 'connected'
       backoffMs = 1000
       transportSend = (msg) => conn.send(msg)
-      transportClose = () => conn.close()
+      transportClose = () => { conn.close(); quicConn.close() }
+      activeTransportMode.value = 'webrtc_p2p'
 
       conn.onMessage((msg) => handleServerMsg(msg))
       conn.onClose(() => {
-        connectionStatus.value = 'disconnected'
-        transportSend = null
+        console.warn('[oxmux] WebRTC P2P connection lost')
+        activeTransportMode.value = 'ssh'
       })
 
-      sendMsg({ t: 'sess_list' })
+      console.log('[oxmux] WebRTC P2P connected!')
+
+      // Re-subscribe panes
+      for (const paneId of paneHandlers.keys()) {
+        sendMsg({ t: 'sub', pane: paneId })
+      }
     } catch (e) {
-      console.error('[oxmux] WebRTC connection failed:', e)
+      console.error('[oxmux] WebRTC P2P failed:', e)
       connectionStatus.value = 'disconnected'
+      activeTransportMode.value = 'ssh'
     }
   }
 
@@ -378,9 +414,14 @@ export const useTmuxStore = defineStore('tmux', () => {
         const token = msg.agent_token as string
         const host = msg.agent_host as string
         const port = msg.agent_port as number
-        console.log(`[oxmux] transport upgrade ready: ${host}:${port}`)
-        // Auto-connect P2P (QUIC)
-        connectQuicP2P(host, port, token)
+        const target = msg.target as string | undefined
+        console.log(`[oxmux] transport upgrade ready: ${host}:${port} (${target || 'quic_p2p'})`)
+
+        if (target === 'webrtc_p2p') {
+          connectWebRtcTransport(host, port, token)
+        } else {
+          connectQuicP2P(host, port, token)
+        }
         break
       }
       case 'transport_upgrade_failed': {

@@ -94,6 +94,9 @@ pub enum ServerMsg {
         agent_host: String,
         agent_port: u16,
         agent_token: String,
+        /// "quic_p2p" or "webrtc_p2p"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
 
     /// Transport upgrade failed
