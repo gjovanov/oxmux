@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use anyhow::Context;
+use secrecy::ExposeSecret;
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
@@ -277,7 +278,8 @@ pub async fn handle_client_msg(
                         }
                     }
 
-                    let deploy_res = crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, "oxmux-shared-secret", 4433).await;
+                    let jwt_secret = state_clone.config.server.jwt_secret.expose_secret().to_string();
+                    let deploy_res = crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, &jwt_secret, 4433).await;
                     deploy_res.map(|r| (r, ssh))
                 }.await;
 
