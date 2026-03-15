@@ -167,13 +167,19 @@ async fn run_control_mode(
 ) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
 
-    let mut child = tokio::process::Command::new("tmux")
-        .args(["-CC", "attach", "-t", session_name])
+    // Use script(1) to allocate a PTY for tmux -CC
+    // tmux requires a terminal; script provides one when running from systemd
+    let mut child = tokio::process::Command::new("script")
+        .args([
+            "-q", "-c",
+            &format!("tmux -CC attach -t {}", session_name),
+            "/dev/null",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("failed to spawn tmux -CC")?;
+        .context("failed to spawn tmux -CC via script")?;
 
     let stdout = child.stdout.take().context("no stdout")?;
     let reader = tokio::io::BufReader::new(stdout);
