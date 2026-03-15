@@ -51,9 +51,9 @@ test.describe('Agent Install & Status', () => {
     }
     await expect(card.locator('.ms-status.connected')).toBeVisible({ timeout: 30_000 })
 
-    // Wait for agent status to be detected (probe runs in background)
-    // The agent should be running on mars from previous test
-    await page.waitForTimeout(10_000)
+    // Wait for agent status to be detected (probe runs through K8s → WireGuard → mars)
+    // The agent should be running on mars from previous install
+    await page.waitForTimeout(15_000)
 
     // Take screenshot of agent status
     await page.screenshot({ path: `test-results/agent-status-${Date.now()}.png` })
