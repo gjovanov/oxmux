@@ -37,7 +37,9 @@ test.describe('Agent Install & Status', () => {
     await authenticate(page)
   })
 
-  test('detects agent online for host with running agent', async ({ page }) => {
+  test('detects agent online for host with running agent', async ({ page, browserName }) => {
+    // Skip in CI — QUIC probe from K8s pod to mars requires direct UDP connectivity
+    test.skip(!!process.env.CI, 'requires direct UDP to agent host');
     test.setTimeout(60_000)
 
     const name = `agent-detect-${Date.now()}`
