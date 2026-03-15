@@ -11,7 +11,7 @@ use crate::{
     auth::jwt,
     state::AppState,
     webrtc::turn::{build_ice_config, generate_turn_credentials},
-    ws::protocol::{decode_client_msg, encode_server_msg, ServerMsg},
+    ws::protocol::{decode_client_msg, encode_server_msg, ServerMsg, ClientMsg},
     ws::session_handler::{self, ConnectionState},
 };
 
@@ -44,7 +44,8 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
 
     let (mut tx, mut rx) = socket.split();
 
-    let mut conn = ConnectionState::new(user_id.clone());
+    let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<ServerMsg>(64);
+    let mut conn = ConnectionState::new(user_id.clone(), async_tx);
 
     info!(user_id = %user_id, "WebSocket client connected");
 
@@ -67,6 +68,13 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
         // Drain pending pane output
         for frame in session_handler::drain_pane_outputs(&mut conn) {
             let _ = tx.send(Message::Binary(frame.into())).await;
+        }
+
+        // Drain async messages (from background tasks like agent deploy)
+        while let Ok(msg) = async_rx.try_recv() {
+            if let Ok(encoded) = encode_server_msg(&msg) {
+                let _ = tx.send(Message::Binary(encoded.into())).await;
+            }
         }
 
         tokio::select! {

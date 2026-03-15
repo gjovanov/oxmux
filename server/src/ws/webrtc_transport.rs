@@ -120,7 +120,8 @@ impl WebRtcManager {
                 let user_id_msg = user_id.clone();
 
                 // Create connection state for this WebRTC peer
-                let conn = Arc::new(Mutex::new(ConnectionState::new(user_id.clone())));
+                let (async_tx, _async_rx) = tokio::sync::mpsc::channel(64);
+                let conn = Arc::new(Mutex::new(ConnectionState::new(user_id.clone(), async_tx)));
 
                 // Handle incoming DataChannel messages
                 let conn_clone = conn.clone();

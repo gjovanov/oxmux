@@ -4,6 +4,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use anyhow::Context;
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
@@ -13,13 +14,16 @@ use super::protocol::{ClientMsg, ServerMsg, decode_client_msg, encode_server_msg
 pub struct ConnectionState {
     pub user_id: String,
     pub pane_subs: HashMap<String, broadcast::Receiver<Bytes>>,
+    /// Channel for background tasks to send async messages to the client.
+    pub async_sender: tokio::sync::mpsc::Sender<ServerMsg>,
 }
 
 impl ConnectionState {
-    pub fn new(user_id: String) -> Self {
+    pub fn new(user_id: String, async_sender: tokio::sync::mpsc::Sender<ServerMsg>) -> Self {
         Self {
             user_id,
             pane_subs: HashMap::new(),
+            async_sender,
         }
     }
 }
@@ -205,14 +209,101 @@ pub async fn handle_client_msg(
                 }),
             };
 
-            // TODO: spawn async deploy task and send progress updates
-            // For now, return a status message indicating it's not yet implemented
-            info!(host = %host, "agent install requested (async deploy needed)");
+            let async_tx = conn.async_sender.clone();
+            let session_id_clone = session_id.clone();
+            let host_clone = host.clone();
 
+            // Spawn background deploy task
+            tokio::spawn(async move {
+                info!(host = %host_clone, "starting agent deployment");
+
+                // Send "installing" status
+                let _ = async_tx.send(ServerMsg::AgentStatus {
+                    session_id: session_id_clone.clone(),
+                    host: host_clone.clone(),
+                    status: "installing".to_string(),
+                    agent_id: None, version: None, quic_port: Some(4433),
+                }).await;
+
+                // Connect via SSH and deploy
+                let config = std::sync::Arc::new(russh::client::Config::default());
+                let handler = crate::agent::SshDeployHandler;
+                let addr = format!("{}:{}", host_clone, port);
+
+                let deploy_result = async {
+                    let mut ssh = russh::client::connect(config, &addr, handler).await?;
+
+                    // Authenticate
+                    match &auth {
+                        crate::session::types::SshAuthConfig::PrivateKey { path, passphrase } => {
+                            let expanded = if path.starts_with("~/") {
+                                let home = std::env::var("HOME").unwrap_or_else(|_| "/home/oxmux".to_string());
+                                format!("{}/{}", home, &path[2..])
+                            } else {
+                                path.clone()
+                            };
+                            let key_data = tokio::fs::read_to_string(&expanded).await?;
+
+                            // Handle encrypted keys
+                            let key_data = if key_data.contains("DES-EDE3-CBC") || key_data.contains("DES-CBC") {
+                                let pass = passphrase.as_deref().unwrap_or("");
+                                let output = tokio::process::Command::new("openssl")
+                                    .args(["rsa", "-in", &expanded, "-passin", &format!("pass:{}", pass), "-traditional"])
+                                    .output().await?;
+                                if !output.status.success() {
+                                    anyhow::bail!("openssl key conversion failed");
+                                }
+                                String::from_utf8(output.stdout)?
+                            } else {
+                                key_data
+                            };
+
+                            let decode_pass = if key_data.starts_with("-----BEGIN PRIVATE KEY-----") { None } else { passphrase.as_deref() };
+                            let key_pair = russh_keys::decode_secret_key(&key_data, decode_pass)?;
+                            ssh.authenticate_publickey(&user, std::sync::Arc::new(key_pair)).await?;
+                        }
+                        crate::session::types::SshAuthConfig::Password { password } => {
+                            ssh.authenticate_password(&user, password).await?;
+                        }
+                        crate::session::types::SshAuthConfig::Agent => {
+                            ssh.authenticate_none(&user).await?;
+                        }
+                    }
+
+                    crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, "oxmux-shared-secret", 4433).await
+                }.await;
+
+                match deploy_result {
+                    Ok(result) => {
+                        info!(host = %host_clone, "agent deployed successfully");
+                        let _ = async_tx.send(ServerMsg::AgentStatus {
+                            session_id: session_id_clone,
+                            host: host_clone,
+                            status: "starting".to_string(),
+                            agent_id: None,
+                            version: Some("0.1.0".to_string()),
+                            quic_port: Some(result.quic_port),
+                        }).await;
+                    }
+                    Err(e) => {
+                        warn!(host = %host_clone, error = %e, "agent deploy failed");
+                        let _ = async_tx.send(ServerMsg::AgentStatus {
+                            session_id: session_id_clone,
+                            host: host_clone,
+                            status: "error".to_string(),
+                            agent_id: None,
+                            version: None,
+                            quic_port: None,
+                        }).await;
+                    }
+                }
+            });
+
+            // Return immediate acknowledgment
             Some(ServerMsg::AgentStatus {
                 session_id,
                 host,
-                status: "install_requested".to_string(),
+                status: "installing".to_string(),
                 agent_id: None,
                 version: None,
                 quic_port: Some(4433),

@@ -98,7 +98,8 @@ async fn handle_incoming(incoming: IncomingSession, state: Arc<AppState>) -> Res
     send.write_all(&auth_ok).await?;
 
     // Now handle messages like WebSocket — same shared handler
-    let mut conn = ConnectionState::new(user_id.clone());
+    let (async_tx, _async_rx) = tokio::sync::mpsc::channel(64);
+    let mut conn = ConnectionState::new(user_id.clone(), async_tx);
 
     // Load user sessions
     match state.session_manager.load_user_sessions(&user_id).await {
