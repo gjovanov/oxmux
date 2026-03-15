@@ -53,6 +53,13 @@ export async function connectQuic(url: string, token: string, certHash?: ArrayBu
   if (authResult.t !== 'auth_ok') throw new Error('Auth failed: ' + JSON.stringify(authResult))
 
   // Start reading messages in background
+  let streamBuf = new Uint8Array(0)
+  const concatBuffers = (a: Uint8Array, b: Uint8Array) => {
+    const c = new Uint8Array(a.length + b.length)
+    c.set(a, 0)
+    c.set(b, a.length)
+    return c
+  }
   ;(async () => {
     try {
       while (true) {
@@ -60,12 +67,19 @@ export async function connectQuic(url: string, token: string, certHash?: ArrayBu
         if (done) break
         if (!value || value.length === 0) continue
 
-        // Each stream read contains a complete msgpack message
-        try {
-          const msg = decode(value) as Record<string, unknown>
-          messageHandler?.(msg)
-        } catch (e) {
-          console.warn('[oxmux-quic] decode error:', e)
+        // Messages are length-prefixed: 4-byte big-endian length + msgpack
+        streamBuf = concatBuffers(streamBuf, value)
+        while (streamBuf.length >= 4) {
+          const len = new DataView(streamBuf.buffer, streamBuf.byteOffset, 4).getUint32(0)
+          if (streamBuf.length < 4 + len) break
+          const msgBytes = streamBuf.slice(4, 4 + len)
+          streamBuf = streamBuf.slice(4 + len)
+          try {
+            const msg = decode(msgBytes) as Record<string, unknown>
+            messageHandler?.(msg)
+          } catch (e) {
+            console.warn('[oxmux-quic] decode error:', e)
+          }
         }
       }
     } catch (e) {
@@ -77,8 +91,11 @@ export async function connectQuic(url: string, token: string, certHash?: ArrayBu
   return {
     send: (msg: Record<string, unknown>) => {
       const encoded = encode(msg)
-      // No length prefix for sends — server reads raw from stream
-      writer.write(encoded).catch(() => {})
+      // Length-prefix: 4-byte big-endian length + msgpack payload
+      const frame = new Uint8Array(4 + encoded.length)
+      new DataView(frame.buffer).setUint32(0, encoded.length)
+      frame.set(new Uint8Array(encoded), 4)
+      writer.write(frame).catch(() => {})
     },
     close: () => {
       transport.close()

@@ -86,42 +86,56 @@ async fn handle_session(
 
     info!("Client authenticated");
 
-    // Send auth OK
+    // Send auth OK (raw msgpack, no length prefix for auth handshake)
     let auth_ok = rmp_serde::to_vec_named(&serde_json::json!({"t": "auth_ok"}))?;
     send.write_all(&auth_ok).await?;
 
-    // Message loop
-    let mut msg_buf = vec![0u8; 65536];
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+    // After auth, all messages are length-prefixed (client → agent and agent → client)
+
+    // Message loop — read length-prefixed messages (4-byte big-endian + msgpack)
+    let mut stream_buf = Vec::new();
+    let mut read_buf = vec![0u8; 65536];
 
     loop {
-        tokio::select! {
-            biased;
-
-            result = recv.read(&mut msg_buf) => {
-                match result {
-                    Ok(Some(n)) if n > 0 => {
-                        if let Err(e) = handle_message(&msg_buf[..n], &tmux_mgr, &mut send).await {
-                            warn!("Message error: {}", e);
-                        }
-                    }
-                    Ok(_) => {
-                        info!("Client disconnected");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("Read error: {}", e);
-                        break;
-                    }
-                }
+        // Process any complete messages in the buffer
+        while stream_buf.len() >= 4 {
+            let msg_len = u32::from_be_bytes([stream_buf[0], stream_buf[1], stream_buf[2], stream_buf[3]]) as usize;
+            if stream_buf.len() < 4 + msg_len {
+                break; // Wait for more data
             }
+            let msg_data = stream_buf[4..4 + msg_len].to_vec();
+            stream_buf.drain(..4 + msg_len);
 
-            _ = interval.tick() => {
-                // Could drain pane outputs here for subscribed panes
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send).await {
+                warn!("Message error: {}", e);
+            }
+        }
+
+        // Read more data from the stream
+        match recv.read(&mut read_buf).await {
+            Ok(Some(n)) if n > 0 => {
+                stream_buf.extend_from_slice(&read_buf[..n]);
+            }
+            Ok(_) => {
+                info!("Client disconnected");
+                break;
+            }
+            Err(e) => {
+                warn!("Read error: {}", e);
+                break;
             }
         }
     }
 
+    Ok(())
+}
+
+/// Send a length-prefixed msgpack message.
+async fn send_response(send: &mut wtransport::SendStream, msg: &serde_json::Value) -> Result<()> {
+    let encoded = rmp_serde::to_vec_named(msg)?;
+    let len = (encoded.len() as u32).to_be_bytes();
+    send.write_all(&len).await?;
+    send.write_all(&encoded).await?;
     Ok(())
 }
 
@@ -131,7 +145,10 @@ async fn handle_message(
     send: &mut wtransport::SendStream,
 ) -> Result<()> {
     let msg: serde_json::Value = rmp_serde::from_slice(data)
-        .context("failed to decode message")?;
+        .with_context(|| format!(
+            "failed to decode message ({} bytes, first: {:?})",
+            data.len(), &data[..data.len().min(20)]
+        ))?;
 
     let t = msg.get("t").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -157,8 +174,7 @@ async fn handle_message(
                     }],
                 }
             });
-            let encoded = rmp_serde::to_vec_named(&reply)?;
-            send.write_all(&encoded).await?;
+            send_response(send, &reply).await?;
         }
 
         "sub" => {
@@ -191,14 +207,12 @@ async fn handle_message(
         "ping" => {
             let ts = msg.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
             let reply = serde_json::json!({"t": "pong", "ts": ts});
-            let encoded = rmp_serde::to_vec_named(&reply)?;
-            send.write_all(&encoded).await?;
+            send_response(send, &reply).await?;
         }
 
         "sess_list" => {
             let reply = serde_json::json!({"t": "sess_list", "sessions": []});
-            let encoded = rmp_serde::to_vec_named(&reply)?;
-            send.write_all(&encoded).await?;
+            send_response(send, &reply).await?;
         }
 
         other => {
