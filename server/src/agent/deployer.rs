@@ -104,7 +104,7 @@ pub async fn deploy_via_ssh(
     info!(host, "binary uploaded to /tmp via scp");
 
     // Move to /usr/local/bin and make executable (try sudo, fall back to user-local)
-    let install_result = exec_command(handle,
+    let install_result = exec_ssh_command(handle,
         "sudo mv /tmp/oxmux-agent-upload /usr/local/bin/oxmux-agent && sudo chmod +x /usr/local/bin/oxmux-agent && echo INSTALL_OK || \
          (mv /tmp/oxmux-agent-upload ~/oxmux-agent && chmod +x ~/oxmux-agent && echo INSTALL_OK_HOME)"
     ).await?;
@@ -150,7 +150,7 @@ systemctl daemon-reload && systemctl enable --now oxmux-agent' && echo SERVICE_O
         quic_port = quic_port, agent_secret = agent_secret, agent_bin = agent_bin
     );
 
-    let result = exec_command(handle, &service_cmd).await?;
+    let result = exec_ssh_command(handle, &service_cmd).await?;
     if !result.contains("SERVICE_OK") {
         anyhow::bail!("service creation failed: {}", result.trim());
     }
@@ -164,7 +164,8 @@ systemctl daemon-reload && systemctl enable --now oxmux-agent' && echo SERVICE_O
     })
 }
 
-async fn exec_command(handle: &client::Handle<super::SshDeployHandler>, cmd: &str) -> Result<String> {
+/// Execute a command via SSH and return stdout. Public for use by probe/status checks.
+pub async fn exec_ssh_command(handle: &client::Handle<super::SshDeployHandler>, cmd: &str) -> Result<String> {
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, cmd.as_bytes()).await?;
 

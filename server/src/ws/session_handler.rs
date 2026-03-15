@@ -181,43 +181,18 @@ pub async fn handle_client_msg(
                 });
             }
 
-            // Not in registry — probe QUIC port to check if agent exists
-            let host_clone = host.clone();
-            let async_tx = conn.async_sender.clone();
-            tokio::spawn(async move {
-                match crate::agent::probe::probe_agent(&host_clone, 4433).await {
-                    Ok(true) => {
-                        let _ = async_tx.send(ServerMsg::AgentStatus {
-                            session_id: String::new(),
-                            host: host_clone,
-                            status: "online".to_string(),
-                            agent_id: None,
-                            version: None,
-                            quic_port: Some(4433),
-                        }).await;
-                    }
-                    _ => {
-                        let _ = async_tx.send(ServerMsg::AgentStatus {
-                            session_id: String::new(),
-                            host: host_clone,
-                            status: "not_installed".to_string(),
-                            agent_id: None,
-                            version: None,
-                            quic_port: None,
-                        }).await;
-                    }
-                }
-            });
-
-            // Immediate response while probe runs
-            Some(ServerMsg::AgentStatus {
+            // Not in registry — return not_installed (agent will be detected on install)
+            return Some(ServerMsg::AgentStatus {
                 session_id: String::new(),
                 host,
-                status: "checking".to_string(),
+                status: "not_installed".to_string(),
                 agent_id: None,
                 version: None,
                 quic_port: None,
-            })
+            });
+
+            // unreachable — returned above
+            None
         }
 
         ClientMsg::InstallAgent { session_id } => {
@@ -302,12 +277,13 @@ pub async fn handle_client_msg(
                         }
                     }
 
-                    crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, "oxmux-shared-secret", 4433).await
+                    let deploy_res = crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, "oxmux-shared-secret", 4433).await;
+                    deploy_res.map(|r| (r, ssh))
                 }.await;
 
                 match deploy_result {
-                    Ok(result) => {
-                        info!(host = %host_clone, "agent deployed, probing...");
+                    Ok((result, ssh_handle)) => {
+                        info!(host = %host_clone, "agent deployed, checking status...");
                         let _ = async_tx.send(ServerMsg::AgentStatus {
                             session_id: session_id_clone.clone(),
                             host: host_clone.clone(),
@@ -317,14 +293,17 @@ pub async fn handle_client_msg(
                             quic_port: Some(result.quic_port),
                         }).await;
 
-                        // Probe agent with retries (may take a moment to start)
+                        // Check agent via SSH (more reliable than QUIC probe through K8s network)
                         let mut online = false;
-                        for attempt in 1..=6 {
+                        for attempt in 1..=5 {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            match crate::agent::probe::probe_agent(&host_clone, result.quic_port).await {
-                                Ok(true) => {
+                            let check = crate::agent::deployer::exec_ssh_command(
+                                &ssh_handle, "systemctl is-active oxmux-agent 2>/dev/null"
+                            ).await;
+                            match check {
+                                Ok(output) if output.trim() == "active" => {
                                     online = true;
-                                    info!(host = %host_clone, attempt, "agent is online");
+                                    info!(host = %host_clone, attempt, "agent is active (systemctl)");
                                     break;
                                 }
                                 _ => {

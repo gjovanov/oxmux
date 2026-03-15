@@ -39,10 +39,13 @@ async fn main() -> Result<()> {
 
     let tmux_mgr = Arc::new(TmuxManager::new());
 
-    // Generate self-signed cert for QUIC
+    // Generate self-signed cert for QUIC/WebTransport
     let (cert, key) = quic::tls::self_signed_cert()?;
 
-    // Start QUIC listener
+    // Log cert fingerprint for debugging
+    info!("Certificate loaded, {} bytes", cert[0].as_ref().len());
+
+    // Start WebTransport listener
     quic::server::run(quic_port, cert, key, tmux_mgr, agent_secret).await?;
 
     Ok(())

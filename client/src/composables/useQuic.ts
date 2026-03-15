@@ -21,9 +21,17 @@ export interface QuicConnection {
  * @param url - WebTransport URL, e.g. "https://oxmux.app:4433"
  * @param token - JWT auth token
  */
-export async function connectQuic(url: string, token: string): Promise<QuicConnection> {
+export async function connectQuic(url: string, token: string, certHash?: ArrayBuffer): Promise<QuicConnection> {
   // @ts-ignore — WebTransport may not be in all TS type defs
-  const transport = new WebTransport(url)
+  const opts: any = {}
+  if (certHash) {
+    // Pin self-signed cert for P2P agent connections
+    opts.serverCertificateHashes = [{
+      algorithm: 'sha-256',
+      value: certHash,
+    }]
+  }
+  const transport = new WebTransport(url, opts)
   await transport.ready
 
   // Open a bidirectional stream

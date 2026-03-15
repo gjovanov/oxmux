@@ -1,60 +1,79 @@
-//! QUIC server for the agent — accepts connections from browsers (P2P) or the relay server.
-//! Speaks the same MessagePack protocol as the server's WebSocket handler.
+//! QUIC/WebTransport server for the agent.
+//! Accepts connections from browsers (P2P via WebTransport) or the relay server (raw QUIC).
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 use tracing::{info, warn};
+use wtransport::{Endpoint, Identity, ServerConfig};
 
 use crate::tmux_manager::TmuxManager;
 
 pub async fn run(
     port: u16,
-    cert_chain: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
+    cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
     tmux_mgr: Arc<TmuxManager>,
     agent_secret: String,
 ) -> Result<()> {
-    let tls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
+    let cert_pem: Vec<String> = cert_chain.iter().map(|c| {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, c.as_ref());
+        format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----", b64)
+    }).collect();
+    let key_pem = match &key {
+        rustls::pki_types::PrivateKeyDer::Pkcs8(k) => {
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k.secret_pkcs8_der());
+            format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", b64)
+        }
+        _ => anyhow::bail!("unsupported key format"),
+    };
 
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)?,
-    ));
+    // Write temp PEM files for wtransport Identity::load_pemfiles
+    let cert_path = "/tmp/oxmux-agent-cert.pem";
+    let key_path = "/tmp/oxmux-agent-key.pem";
+    tokio::fs::write(cert_path, cert_pem.join("\n")).await?;
+    tokio::fs::write(key_path, &key_pem).await?;
 
-    let addr = format!("0.0.0.0:{}", port).parse()?;
-    let endpoint = quinn::Endpoint::server(server_config, addr)?;
+    let identity = Identity::load_pemfiles(cert_path, key_path).await
+        .context("failed to load identity from PEM")?;
 
-    info!("QUIC agent listener on :{}", port);
+    let config = ServerConfig::builder()
+        .with_bind_default(port)
+        .with_identity(identity)
+        .build();
 
-    while let Some(incoming) = endpoint.accept().await {
+    let endpoint = Endpoint::server(config)?;
+
+    info!("WebTransport agent listener on :{}", port);
+
+    loop {
+        let incoming = endpoint.accept().await;
         let mgr = tmux_mgr.clone();
         let secret = agent_secret.clone();
         tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    info!("Client connected: {}", conn.remote_address());
-                    if let Err(e) = handle_connection(conn, mgr, secret).await {
-                        warn!("Connection error: {}", e);
-                    }
-                }
-                Err(e) => warn!("Incoming QUIC error: {}", e),
+            if let Err(e) = handle_session(incoming, mgr, secret).await {
+                warn!("Session error: {}", e);
             }
         });
     }
-
-    Ok(())
 }
 
-async fn handle_connection(
-    conn: quinn::Connection,
+async fn handle_session(
+    incoming: wtransport::endpoint::IncomingSession,
     tmux_mgr: Arc<TmuxManager>,
     agent_secret: String,
 ) -> Result<()> {
-    // Accept bidirectional stream for control
-    let (mut send, mut recv) = conn
+    let session_request = incoming.await?;
+
+    info!(
+        authority = %session_request.authority(),
+        path = %session_request.path(),
+        "WebTransport session request"
+    );
+
+    let session = session_request.accept().await?;
+
+    // Accept bidirectional stream
+    let (mut send, mut recv) = session
         .accept_bi()
         .await
         .context("failed to accept bi stream")?;
@@ -75,7 +94,7 @@ async fn handle_connection(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing token"))?;
 
-    // Verify JWT if agent secret is configured
+    // Verify JWT if secret is configured
     if !agent_secret.is_empty() {
         let validation = jsonwebtoken::Validation::default();
         let key = jsonwebtoken::DecodingKey::from_secret(agent_secret.as_bytes());
@@ -91,25 +110,9 @@ async fn handle_connection(
 
     // Message loop
     let mut msg_buf = vec![0u8; 65536];
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
 
     loop {
-        // Drain pane outputs
-        for entry in tmux_mgr.pane_outputs.iter() {
-            let pane_id = entry.key().clone();
-            let tx = entry.value();
-            let mut rx = tx.subscribe();
-            while let Ok(data) = rx.try_recv() {
-                let msg = serde_json::json!({
-                    "t": "o",
-                    "pane": pane_id,
-                    "data": data.to_vec(),
-                });
-                if let Ok(encoded) = rmp_serde::to_vec_named(&msg) {
-                    let _ = send.write_all(&encoded).await;
-                }
-            }
-        }
-
         tokio::select! {
             biased;
 
@@ -117,7 +120,7 @@ async fn handle_connection(
                 match result {
                     Ok(Some(n)) if n > 0 => {
                         if let Err(e) = handle_message(&msg_buf[..n], &tmux_mgr, &mut send).await {
-                            warn!("Message handling error: {}", e);
+                            warn!("Message error: {}", e);
                         }
                     }
                     Ok(_) => {
@@ -131,7 +134,9 @@ async fn handle_connection(
                 }
             }
 
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {}
+            _ = interval.tick() => {
+                // Could drain pane outputs here for subscribed panes
+            }
         }
     }
 
@@ -141,7 +146,7 @@ async fn handle_connection(
 async fn handle_message(
     data: &[u8],
     tmux_mgr: &TmuxManager,
-    send: &mut quinn::SendStream,
+    send: &mut wtransport::SendStream,
 ) -> Result<()> {
     let msg: serde_json::Value = rmp_serde::from_slice(data)
         .context("failed to decode message")?;
@@ -209,10 +214,7 @@ async fn handle_message(
         }
 
         "sess_list" => {
-            let reply = serde_json::json!({
-                "t": "sess_list",
-                "sessions": []
-            });
+            let reply = serde_json::json!({"t": "sess_list", "sessions": []});
             let encoded = rmp_serde::to_vec_named(&reply)?;
             send.write_all(&encoded).await?;
         }
