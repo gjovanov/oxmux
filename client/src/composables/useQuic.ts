@@ -46,12 +46,10 @@ export async function connectQuic(url: string, token: string, certHash?: ArrayBu
   const authMsg = encode({ t: 'auth', token })
   await writer.write(authMsg)
 
-  // Read auth response (length-prefixed)
+  // Read auth response (raw msgpack, no length prefix)
   const authResp = await reader.read()
   if (authResp.done) throw new Error('Connection closed during auth')
-  // Skip length prefix (4 bytes) + decode
-  const authData = authResp.value.slice(4)
-  const authResult = decode(authData) as Record<string, unknown>
+  const authResult = decode(authResp.value) as Record<string, unknown>
   if (authResult.t !== 'auth_ok') throw new Error('Auth failed: ' + JSON.stringify(authResult))
 
   // Start reading messages in background
@@ -62,22 +60,12 @@ export async function connectQuic(url: string, token: string, certHash?: ArrayBu
         if (done) break
         if (!value || value.length === 0) continue
 
-        // Messages are length-prefixed (4 bytes big-endian + msgpack)
-        let offset = 0
-        while (offset < value.length) {
-          if (offset + 4 > value.length) break
-          const len = new DataView(value.buffer, value.byteOffset + offset, 4).getUint32(0)
-          offset += 4
-          if (offset + len > value.length) break
-          const msgBytes = value.slice(offset, offset + len)
-          offset += len
-
-          try {
-            const msg = decode(msgBytes) as Record<string, unknown>
-            messageHandler?.(msg)
-          } catch (e) {
-            console.warn('[oxmux-quic] decode error:', e)
-          }
+        // Each stream read contains a complete msgpack message
+        try {
+          const msg = decode(value) as Record<string, unknown>
+          messageHandler?.(msg)
+        } catch (e) {
+          console.warn('[oxmux-quic] decode error:', e)
         }
       }
     } catch (e) {
