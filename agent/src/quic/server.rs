@@ -10,31 +10,13 @@ use crate::tmux_manager::TmuxManager;
 
 pub async fn run(
     port: u16,
-    cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
-    key: rustls::pki_types::PrivateKeyDer<'static>,
+    cert_path: &str,
+    key_path: &str,
     tmux_mgr: Arc<TmuxManager>,
     agent_secret: String,
 ) -> Result<()> {
-    let cert_pem: Vec<String> = cert_chain.iter().map(|c| {
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, c.as_ref());
-        format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----", b64)
-    }).collect();
-    let key_pem = match &key {
-        rustls::pki_types::PrivateKeyDer::Pkcs8(k) => {
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k.secret_pkcs8_der());
-            format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", b64)
-        }
-        _ => anyhow::bail!("unsupported key format"),
-    };
-
-    // Write temp PEM files for wtransport Identity::load_pemfiles
-    let cert_path = "/tmp/oxmux-agent-cert.pem";
-    let key_path = "/tmp/oxmux-agent-key.pem";
-    tokio::fs::write(cert_path, cert_pem.join("\n")).await?;
-    tokio::fs::write(key_path, &key_pem).await?;
-
     let identity = Identity::load_pemfiles(cert_path, key_path).await
-        .context("failed to load identity from PEM")?;
+        .context("failed to load TLS identity")?;
 
     let config = ServerConfig::builder()
         .with_bind_default(port)

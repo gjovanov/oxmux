@@ -39,14 +39,34 @@ async fn main() -> Result<()> {
 
     let tmux_mgr = Arc::new(TmuxManager::new());
 
-    // Generate self-signed cert for QUIC/WebTransport
-    let (cert, key) = quic::tls::self_signed_cert()?;
+    // TLS cert paths
+    let cert_path = std::env::var("AGENT_CERT_PATH")
+        .unwrap_or_else(|_| "/etc/oxmux-agent-cert.pem".to_string());
+    let key_path = std::env::var("AGENT_KEY_PATH")
+        .unwrap_or_else(|_| "/etc/oxmux-agent-key.pem".to_string());
 
-    // Log cert fingerprint for debugging
-    info!("Certificate loaded, {} bytes", cert[0].as_ref().len());
+    if !std::path::Path::new(&cert_path).exists() || !std::path::Path::new(&key_path).exists() {
+        // Generate self-signed cert and write to default paths
+        info!("No cert files found, generating self-signed");
+        let (certs, key) = quic::tls::self_signed_cert()?;
+        let cert_pem: String = certs.iter().map(|c| {
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, c.as_ref());
+            format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", b64)
+        }).collect();
+        let key_der = match &key {
+            rustls::pki_types::PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
+            _ => anyhow::bail!("unsupported self-signed key format"),
+        };
+        let key_pem = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key_der));
+        std::fs::write(&cert_path, &cert_pem)?;
+        std::fs::write(&key_path, &key_pem)?;
+    }
+
+    info!("Using TLS cert: {}, key: {}", cert_path, key_path);
 
     // Start WebTransport listener
-    quic::server::run(quic_port, cert, key, tmux_mgr, agent_secret).await?;
+    quic::server::run(quic_port, &cert_path, &key_path, tmux_mgr, agent_secret).await?;
 
     Ok(())
 }

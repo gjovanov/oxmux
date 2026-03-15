@@ -412,9 +412,11 @@ pub async fn handle_client_msg(
                         agent_id = %agent.id,
                         "transport upgrade ready"
                     );
+                    // Use agent.oxmux.app hostname for valid TLS cert matching
+                    let agent_hostname = format!("agent.oxmux.app");
                     Some(ServerMsg::TransportUpgradeReady {
                         session_id,
-                        agent_host: agent.host,
+                        agent_host: agent_hostname,
                         agent_port: agent.quic_port,
                         agent_token: token,
                     })
