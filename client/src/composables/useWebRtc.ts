@@ -126,17 +126,24 @@ export async function connectWebRtc(
             sdp,
           }))
           console.log('[oxmux-webrtc] remote desc set OK, signalingState:', pc.signalingState)
-          remoteDescSet = true
-
-          // Process queued candidates
-          for (const c of pendingCandidates) {
-            await pc.addIceCandidate(new RTCIceCandidate(c))
-          }
-          pendingCandidates.length = 0
-          console.log('[oxmux-webrtc] remote desc set, processed queued candidates')
 
           const answer = await pc.createAnswer()
           await pc.setLocalDescription(answer)
+          console.log('[oxmux-webrtc] local desc (answer) set, signalingState:', pc.signalingState)
+
+          remoteDescSet = true
+
+          // Process queued candidates AFTER both descriptions are set
+          for (const c of pendingCandidates) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(c))
+              console.log('[oxmux-webrtc] added queued candidate:', c.candidate?.slice(0, 50))
+            } catch (e) {
+              console.error('[oxmux-webrtc] failed to add candidate:', e, c)
+            }
+          }
+          console.log('[oxmux-webrtc] processed', pendingCandidates.length, 'queued candidates')
+          pendingCandidates.length = 0
           const answerSdp = pc.localDescription?.sdp || ''
           console.log('[oxmux-webrtc] answer created, signalingState:', pc.signalingState,
             'localCandidates:', (answerSdp.match(/a=candidate/g) || []).length)
