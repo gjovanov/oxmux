@@ -279,7 +279,9 @@ pub async fn handle_client_msg(
                     }
 
                     let jwt_secret = state_clone.config.server.jwt_secret.expose_secret().to_string();
-                    let deploy_res = crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, &jwt_secret, 4433).await;
+                    let coturn_secret = state_clone.config.coturn.auth_secret.expose_secret().to_string();
+                    let coturn_servers = state_clone.config.coturn.servers.clone();
+                    let deploy_res = crate::agent::deployer::deploy_via_ssh(&ssh, &host_clone, port, &user, &auth, &jwt_secret, &coturn_secret, &coturn_servers, 4433).await;
                     deploy_res.map(|r| (r, ssh))
                 }.await;
 

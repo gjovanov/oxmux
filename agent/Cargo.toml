@@ -24,6 +24,8 @@ rmpv = "1"
 bytes = { version = "1", features = ["serde"] }
 dashmap = "6"
 base64 = "0.22"
+hmac = "0.12"
+sha1 = "0.10"
 rustls-pemfile = "2"
 anyhow = "1"
 tracing = "0.1"

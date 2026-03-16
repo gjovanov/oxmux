@@ -22,6 +22,8 @@ pub async fn deploy_via_ssh(
     user: &str,
     auth: &crate::session::types::SshAuthConfig,
     agent_secret: &str,
+    coturn_secret: &str,
+    coturn_servers: &str,
     quic_port: u16,
 ) -> Result<DeployResult> {
     info!(host, "deploying oxmux-agent");
@@ -138,6 +140,8 @@ After=network.target
 Type=simple
 Environment=AGENT_QUIC_PORT={quic_port}
 Environment=OXMUX_AGENT_SECRET={agent_secret}
+Environment=COTURN_AUTH_SECRET={coturn_secret}
+Environment=COTURN_SERVERS={coturn_servers}
 Environment=RUST_LOG=oxmux_agent=info
 ExecStart={agent_bin}
 Restart=always

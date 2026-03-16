@@ -424,13 +424,51 @@ async fn create_webrtc_peer(
         .with_interceptor_registry(registry)
         .build();
 
+    // Generate TURN credentials using COTURN shared secret (HMAC-SHA1)
+    let coturn_secret = std::env::var("COTURN_AUTH_SECRET").unwrap_or_default();
+    let mut ice_servers = vec![
+        RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        },
+    ];
+
+    if !coturn_secret.is_empty() {
+        let ttl = 86400u64;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() + ttl;
+        let username = format!("{}:oxmux-agent", timestamp);
+
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+        type HmacSha1 = Hmac<Sha1>;
+
+        let mut mac = HmacSha1::new_from_slice(coturn_secret.as_bytes())
+            .expect("HMAC key");
+        mac.update(username.as_bytes());
+        let credential = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            mac.finalize().into_bytes(),
+        );
+
+        let turn_servers = std::env::var("COTURN_SERVERS")
+            .unwrap_or_else(|_| "94.130.141.98:3478,5.9.157.226:3478,5.9.157.221:3478".to_string());
+        let turn_urls: Vec<String> = turn_servers.split(',')
+            .map(|s| format!("turn:{}", s.trim()))
+            .collect();
+
+        ice_servers.push(RTCIceServer {
+            urls: turn_urls,
+            username: username.clone(),
+            credential: credential.clone(),
+            credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
+        });
+    }
+
     let config = RTCConfiguration {
-        ice_servers: vec![
-            RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                ..Default::default()
-            },
-        ],
+        ice_servers,
         ..Default::default()
     };
 
