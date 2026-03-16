@@ -97,13 +97,24 @@ export async function connectWebRtc(
     // ICE candidate handling
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
+        console.log('[oxmux-webrtc] sending browser ICE candidate:', ev.candidate.candidate)
         sendSignal({
           type: 'ice_candidate',
           candidate: ev.candidate.candidate,
           sdp_mid: ev.candidate.sdpMid,
           sdp_mline_index: ev.candidate.sdpMLineIndex,
         })
+      } else {
+        console.log('[oxmux-webrtc] ICE gathering complete')
       }
+    }
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('[oxmux-webrtc] ICE connection state:', pc.iceConnectionState)
+    }
+
+    pc.onicegatheringstatechange = () => {
+      console.log('[oxmux-webrtc] ICE gathering state:', pc.iceGatheringState)
     }
 
     pc.onconnectionstatechange = () => {
