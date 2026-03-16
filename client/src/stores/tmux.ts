@@ -226,6 +226,10 @@ export const useTmuxStore = defineStore('tmux', () => {
       console.log('[oxmux] opening QUIC signaling channel for WebRTC')
       const quicConn = await doQuic(quicUrl, token)
 
+      // Send session name so agent can set up control mode
+      const activeSess = managedSessions.value.find(s => s.id === activeSessionId.value)
+      quicConn.send({ t: 'sess_connect', name: activeSess?.name || 'default' })
+
       // Keep QUIC alive during WebRTC negotiation
       const keepAlive = setInterval(() => quicConn.send({ t: 'ping', ts: Date.now() }), 5000)
 
@@ -257,6 +261,9 @@ export const useTmuxStore = defineStore('tmux', () => {
           credential: s.credential,
         })),
       }
+
+      // Wait for agent to set up control mode before starting WebRTC
+      await new Promise(r => setTimeout(r, 1000))
 
       const conn = await connectWebRtc(
         iceConfig,
