@@ -60,7 +60,7 @@ jsonwebtoken = "9"
 wtransport = "0.7"
 
 # WebRTC (DataChannel browser transport)
-webrtc = "0.11"
+webrtc = "0.17"
 
 # Async traits
 async-trait = "0.1"

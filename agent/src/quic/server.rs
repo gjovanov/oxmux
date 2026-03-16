@@ -516,7 +516,7 @@ async fn create_webrtc_offer(
             urls: turn_urls,
             username: username.clone(),
             credential: credential.clone(),
-            credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
+            // credential_type defaults to Password in v0.17+
         });
     }
 
