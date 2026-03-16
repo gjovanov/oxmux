@@ -108,27 +108,41 @@ export async function connectWebRtc(
       }
     }
 
-    // Handle signaling from agent
+    // Queue ICE candidates until remote description is set
+    let remoteDescSet = false
+    const pendingCandidates: any[] = []
+
     onSignal(async (payload) => {
       try {
         if (payload.type === 'offer') {
-          // Agent sent offer — set as remote, create answer
           console.log('[oxmux-webrtc] received offer from agent')
           await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'offer',
             sdp: payload.sdp as string,
           }))
+          remoteDescSet = true
+
+          // Process queued candidates
+          for (const c of pendingCandidates) {
+            await pc.addIceCandidate(new RTCIceCandidate(c))
+          }
+          pendingCandidates.length = 0
+          console.log('[oxmux-webrtc] remote desc set, processed queued candidates')
+
           const answer = await pc.createAnswer()
           await pc.setLocalDescription(answer)
-          console.log('[oxmux-webrtc] sending answer, signalingState:', pc.signalingState)
+          console.log('[oxmux-webrtc] answer created, signalingState:', pc.signalingState)
           sendSignal({ type: 'answer', sdp: answer.sdp })
         } else if (payload.type === 'ice_candidate') {
           const c = payload.candidate as any
-          await pc.addIceCandidate(new RTCIceCandidate(
-            typeof c === 'string'
-              ? { candidate: c, sdpMid: '0', sdpMLineIndex: 0 }
-              : c
-          ))
+          const candidate = typeof c === 'string'
+            ? { candidate: c, sdpMid: '0', sdpMLineIndex: 0 }
+            : c
+          if (remoteDescSet) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate))
+          } else {
+            pendingCandidates.push(candidate)
+          }
         }
       } catch (e) {
         console.error('[oxmux-webrtc] signaling error:', e)
