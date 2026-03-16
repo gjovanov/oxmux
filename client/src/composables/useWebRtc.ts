@@ -150,14 +150,31 @@ export async function connectWebRtc(
 
     // Create and send offer
     pc.createOffer()
-      .then(offer => pc.setLocalDescription(offer))
+      .then(offer => {
+        console.log('[oxmux-webrtc] offer created, setting local description')
+        return pc.setLocalDescription(offer)
+      })
       .then(() => {
+        console.log('[oxmux-webrtc] local description set, sending offer, signalingState:', pc.signalingState)
         sendSignal({
           type: 'offer',
           sdp: pc.localDescription?.sdp,
         })
       })
-      .catch(reject)
+      .catch(e => {
+        console.error('[oxmux-webrtc] offer/setLocal error:', e)
+        reject(e)
+      })
+
+    // Check ICE state after 5 seconds
+    setTimeout(() => {
+      console.log('[oxmux-webrtc] 5s check — ICE:', pc.iceConnectionState,
+        'gathering:', pc.iceGatheringState,
+        'signaling:', pc.signalingState,
+        'connection:', pc.connectionState,
+        'localCandidates:', pc.localDescription?.sdp?.match(/a=candidate/g)?.length || 0,
+        'remoteCandidates:', pc.remoteDescription?.sdp?.match(/a=candidate/g)?.length || 0)
+    }, 5000)
 
     // Timeout
     setTimeout(() => {
