@@ -105,9 +105,13 @@ async fn handle_session(
     let (output_tx, mut output_rx) = mpsc::channel::<(String, Bytes)>(512);
     let ctrl_session_name = session_name.to_string();
 
-    // Store WebRTC peer connection for ICE candidate handling
+    // Store WebRTC peer connection + pending candidates for ICE handling
     let webrtc_pc: Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    let webrtc_remote_set: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let webrtc_pending_candidates: Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     let ctrl_handle = tokio::spawn(async move {
         if let Err(e) = run_control_mode(&ctrl_session_name, output_tx).await {
@@ -144,7 +148,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -288,6 +292,8 @@ async fn handle_message(
     tmux_mgr: &TmuxManager,
     send: &mut wtransport::SendStream,
     webrtc_pc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>>,
+    webrtc_remote_set: &Arc<std::sync::atomic::AtomicBool>,
+    webrtc_pending_candidates: &Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
     let t = get_str(&msg, "t");
@@ -374,6 +380,16 @@ async fn handle_message(
                     warn!(error = %e, "Failed to set remote description");
                 } else {
                     info!("WebRTC remote description (answer) set");
+                    webrtc_remote_set.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    // Process queued candidates
+                    let mut pending = webrtc_pending_candidates.lock().await;
+                    info!(count = pending.len(), "processing queued browser ICE candidates");
+                    for c in pending.drain(..) {
+                        if let Err(e) = pc.add_ice_candidate(c).await {
+                            warn!(error = %e, "failed to add queued candidate");
+                        }
+                    }
                 }
             }
         }
@@ -401,17 +417,25 @@ async fn handle_message(
             };
 
             if !candidate_str.is_empty() {
-                info!(candidate = %candidate_str.get(..50).unwrap_or(&candidate_str), "received ICE candidate from browser");
-                if let Some(pc) = webrtc_pc.lock().await.as_ref() {
-                    let candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
-                        candidate: candidate_str,
-                        sdp_mid: Some(sdp_mid),
-                        sdp_mline_index: Some(0),
-                        ..Default::default()
-                    };
-                    if let Err(e) = pc.add_ice_candidate(candidate).await {
-                        warn!(error = %e, "failed to add ICE candidate");
+                let candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                    candidate: candidate_str.clone(),
+                    sdp_mid: Some(sdp_mid),
+                    sdp_mline_index: Some(0),
+                    ..Default::default()
+                };
+
+                if webrtc_remote_set.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Remote description set — add immediately
+                    info!(candidate = %candidate_str.get(..50).unwrap_or(&candidate_str), "adding ICE candidate");
+                    if let Some(pc) = webrtc_pc.lock().await.as_ref() {
+                        if let Err(e) = pc.add_ice_candidate(candidate).await {
+                            warn!(error = %e, "failed to add ICE candidate");
+                        }
                     }
+                } else {
+                    // Queue until remote description is set
+                    info!(candidate = %candidate_str.get(..50).unwrap_or(&candidate_str), "queuing ICE candidate (no remote desc yet)");
+                    webrtc_pending_candidates.lock().await.push(candidate);
                 }
             }
         }
