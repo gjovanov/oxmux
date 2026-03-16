@@ -237,7 +237,8 @@ export const useTmuxStore = defineStore('tmux', () => {
       const signalResolvers = new Map<string, (payload: Record<string, unknown>) => void>()
 
       quicConn.onMessage((msg) => {
-        if (msg.t === 'webrtc_answer' || msg.t === 'webrtc_ice') {
+        if (msg.t === 'webrtc_answer' || msg.t === 'webrtc_ice' || msg.t === 'webrtc_error') {
+          console.log('[oxmux] WebRTC signaling msg:', msg.t, msg)
           const handler = signalResolvers.get('signal')
           if (handler) {
             if (msg.t === 'webrtc_answer') {

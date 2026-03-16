@@ -115,6 +115,7 @@ export async function connectWebRtc(
 
     // Handle incoming signaling messages
     onSignal(async (payload) => {
+      console.log('[oxmux-webrtc] signal received:', payload.type, payload)
       if (payload.type === 'answer') {
         await pc.setRemoteDescription(new RTCSessionDescription({
           type: 'answer',
