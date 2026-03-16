@@ -115,11 +115,16 @@ export async function connectWebRtc(
     onSignal(async (payload) => {
       try {
         if (payload.type === 'offer') {
-          console.log('[oxmux-webrtc] received offer from agent')
+          const sdp = payload.sdp as string
+          console.log('[oxmux-webrtc] received offer from agent, SDP lines:', sdp.split('\r\n').length)
+          console.log('[oxmux-webrtc] offer fingerprint:', sdp.match(/a=fingerprint:.*/)?.[0])
+          console.log('[oxmux-webrtc] offer ice-ufrag:', sdp.match(/a=ice-ufrag:.*/)?.[0])
+          console.log('[oxmux-webrtc] offer sctp:', sdp.match(/m=application.*/)?.[0])
           await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'offer',
-            sdp: payload.sdp as string,
+            sdp,
           }))
+          console.log('[oxmux-webrtc] remote desc set OK, signalingState:', pc.signalingState)
           remoteDescSet = true
 
           // Process queued candidates
@@ -131,8 +136,17 @@ export async function connectWebRtc(
 
           const answer = await pc.createAnswer()
           await pc.setLocalDescription(answer)
-          console.log('[oxmux-webrtc] answer created, signalingState:', pc.signalingState)
-          sendSignal({ type: 'answer', sdp: answer.sdp })
+          const answerSdp = pc.localDescription?.sdp || ''
+          console.log('[oxmux-webrtc] answer created, signalingState:', pc.signalingState,
+            'localCandidates:', (answerSdp.match(/a=candidate/g) || []).length)
+          console.log('[oxmux-webrtc] answer sctp:', answerSdp.match(/m=application.*/)?.[0])
+          sendSignal({ type: 'answer', sdp: answerSdp })
+
+          // Check state after 3s
+          setTimeout(() => {
+            console.log('[oxmux-webrtc] 3s: ICE:', pc.iceConnectionState,
+              'gathering:', pc.iceGatheringState, 'conn:', pc.connectionState)
+          }, 3000)
         } else if (payload.type === 'ice_candidate') {
           const c = payload.candidate as any
           const candidate = typeof c === 'string'
