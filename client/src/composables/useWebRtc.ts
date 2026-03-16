@@ -120,6 +120,7 @@ export async function connectWebRtc(
           console.log('[oxmux-webrtc] offer fingerprint:', sdp.match(/a=fingerprint:.*/)?.[0])
           console.log('[oxmux-webrtc] offer ice-ufrag:', sdp.match(/a=ice-ufrag:.*/)?.[0])
           console.log('[oxmux-webrtc] offer sctp:', sdp.match(/m=application.*/)?.[0])
+          console.log('[oxmux-webrtc] FULL OFFER SDP:\n' + sdp)
           await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'offer',
             sdp,
