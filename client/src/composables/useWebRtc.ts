@@ -37,14 +37,14 @@ export async function connectWebRtc(
   onSignal: (handler: (payload: Record<string, unknown>) => void) => void,
 ): Promise<WebRtcConnection> {
   return new Promise((resolve, reject) => {
-    console.log('[oxmux-webrtc] creating PC with ICE config:', JSON.stringify(iceConfig.iceServers))
-    const pc = new RTCPeerConnection({
-      iceServers: iceConfig.iceServers.map(s => ({
-        urls: s.urls,
-        username: s.username,
-        credential: s.credential,
-      })),
-    })
+    // Add Google STUN as fallback + use provided TURN servers
+    const servers = [
+      { urls: ['stun:stun.l.google.com:19302'] },
+      { urls: ['stun:stun1.l.google.com:19302'] },
+      ...iceConfig.iceServers,
+    ]
+    console.log('[oxmux-webrtc] creating PC with ICE servers:', servers.length)
+    const pc = new RTCPeerConnection({ iceServers: servers })
 
     let messageHandler: ((msg: Record<string, unknown>) => void) | null = null
     let closeHandler: (() => void) | null = null
@@ -155,10 +155,16 @@ export async function connectWebRtc(
         return pc.setLocalDescription(offer)
       })
       .then(() => {
-        console.log('[oxmux-webrtc] local description set, sending offer, signalingState:', pc.signalingState)
+        const sdp = pc.localDescription?.sdp || ''
+        const candidateCount = (sdp.match(/a=candidate/g) || []).length
+        console.log('[oxmux-webrtc] local description set, signalingState:', pc.signalingState,
+          'candidates in SDP:', candidateCount)
+        if (candidateCount > 0) {
+          console.log('[oxmux-webrtc] offer has bundled candidates (non-trickle)')
+        }
         sendSignal({
           type: 'offer',
-          sdp: pc.localDescription?.sdp,
+          sdp,
         })
       })
       .catch(e => {

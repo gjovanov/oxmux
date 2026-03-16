@@ -540,6 +540,9 @@ async fn create_webrtc_peer(
         })
     }));
 
+    // Create DataChannel on the agent side (agent is offerer)
+    let _dc_agent = pc.create_data_channel("oxmux-agent", None).await?;
+
     // Set remote description (browser's offer)
     let offer = RTCSessionDescription::offer(offer_sdp.to_string())?;
     pc.set_remote_description(offer).await?;
