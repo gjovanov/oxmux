@@ -430,15 +430,6 @@ async fn create_webrtc_peer(
                 urls: vec!["stun:stun.l.google.com:19302".to_string()],
                 ..Default::default()
             },
-            // Add TURN servers for NAT traversal
-            RTCIceServer {
-                urls: vec![
-                    "turn:94.130.141.98:3478".to_string(),
-                    "turn:5.9.157.226:3478".to_string(),
-                    "turn:5.9.157.221:3478".to_string(),
-                ],
-                ..Default::default()
-            },
         ],
         ..Default::default()
     };
