@@ -37,6 +37,7 @@ export async function connectWebRtc(
   onSignal: (handler: (payload: Record<string, unknown>) => void) => void,
 ): Promise<WebRtcConnection> {
   return new Promise((resolve, reject) => {
+    console.log('[oxmux-webrtc] creating PC with ICE config:', JSON.stringify(iceConfig.iceServers))
     const pc = new RTCPeerConnection({
       iceServers: iceConfig.iceServers.map(s => ({
         urls: s.urls,
@@ -126,18 +127,24 @@ export async function connectWebRtc(
 
     // Handle incoming signaling messages
     onSignal(async (payload) => {
-      console.log('[oxmux-webrtc] signal received:', payload.type, payload)
-      if (payload.type === 'answer') {
-        await pc.setRemoteDescription(new RTCSessionDescription({
-          type: 'answer',
-          sdp: payload.sdp as string,
-        }))
-      } else if (payload.type === 'ice_candidate') {
-        await pc.addIceCandidate(new RTCIceCandidate({
-          candidate: payload.candidate as string,
-          sdpMid: payload.sdp_mid as string | undefined,
-          sdpMLineIndex: payload.sdp_mline_index as number | undefined,
-        }))
+      console.log('[oxmux-webrtc] signal received:', payload.type)
+      try {
+        if (payload.type === 'answer') {
+          console.log('[oxmux-webrtc] setting remote description (answer)')
+          await pc.setRemoteDescription(new RTCSessionDescription({
+            type: 'answer',
+            sdp: payload.sdp as string,
+          }))
+          console.log('[oxmux-webrtc] remote description set, signalingState:', pc.signalingState)
+        } else if (payload.type === 'ice_candidate') {
+          await pc.addIceCandidate(new RTCIceCandidate({
+            candidate: payload.candidate as string,
+            sdpMid: payload.sdp_mid as string || '0',
+            sdpMLineIndex: payload.sdp_mline_index as number || 0,
+          }))
+        }
+      } catch (e) {
+        console.error('[oxmux-webrtc] signaling error:', e)
       }
     })
 
