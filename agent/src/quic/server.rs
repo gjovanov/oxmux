@@ -329,42 +329,51 @@ async fn handle_message(
             send_msg(send, &serde_json::json!({"t": "sess_list", "sessions": []})).await?;
         }
 
-        "webrtc_offer" => {
-            // Browser wants to establish a WebRTC DataChannel P2P connection.
-            // The SDP offer arrives over the existing WebTransport connection.
-            let sdp = get_str(&msg, "sdp").to_string();
-            let peer_id = get_str(&msg, "peer_id").to_string();
-
-            info!(peer_id = %peer_id, "WebRTC offer received, creating peer connection");
+        "webrtc_ready" | "webrtc_offer" => {
+            // parakeet-rs pattern: AGENT creates the offer, browser answers
+            info!("Browser ready for WebRTC, agent creating offer");
 
             let tmux_clone = tmux_mgr.pane_outputs.clone();
-            match create_webrtc_peer(&sdp, tmux_clone).await {
-                Ok((pc, answer_sdp, ice_candidates)) => {
-                    // Store the peer connection for ICE candidate handling
+            match create_webrtc_offer(tmux_clone).await {
+                Ok((pc, offer_sdp, ice_candidates)) => {
                     *webrtc_pc.lock().await = Some(pc);
-                    // Send answer back over WebTransport
+
                     send_msg(send, &serde_json::json!({
-                        "t": "webrtc_answer",
-                        "peer_id": peer_id,
-                        "sdp": answer_sdp,
+                        "t": "webrtc_offer",
+                        "sdp": offer_sdp,
                     })).await?;
 
-                    // Send gathered ICE candidates
-                    for candidate in ice_candidates {
+                    for candidate in &ice_candidates {
                         send_msg(send, &serde_json::json!({
                             "t": "webrtc_ice",
-                            "peer_id": peer_id,
-                            "candidate": candidate,
+                            "candidate": serde_json::json!({
+                                "candidate": candidate,
+                                "sdpMid": "0",
+                                "sdpMLineIndex": 0,
+                            }),
                         })).await?;
                     }
+                    info!(candidates = ice_candidates.len(), "WebRTC offer + candidates sent");
                 }
                 Err(e) => {
-                    warn!(error = %e, "WebRTC peer creation failed");
+                    warn!(error = %e, "WebRTC offer creation failed");
                     send_msg(send, &serde_json::json!({
                         "t": "webrtc_error",
-                        "peer_id": peer_id,
                         "error": e.to_string(),
                     })).await?;
+                }
+            }
+        }
+
+        "webrtc_answer" => {
+            let sdp = get_str(&msg, "sdp").to_string();
+            info!("Received WebRTC answer from browser");
+            if let Some(pc) = webrtc_pc.lock().await.as_ref() {
+                use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+                if let Err(e) = pc.set_remote_description(RTCSessionDescription::answer(sdp)?).await {
+                    warn!(error = %e, "Failed to set remote description");
+                } else {
+                    info!("WebRTC remote description (answer) set");
                 }
             }
         }
@@ -400,8 +409,8 @@ async fn handle_message(
 // ── WebRTC P2P ──────────────────────────────────────────────────────────
 
 /// Create a WebRTC peer connection with DataChannel for terminal I/O.
-async fn create_webrtc_peer(
-    offer_sdp: &str,
+/// Agent creates the offer (parakeet-rs pattern: server is offerer).
+async fn create_webrtc_offer(
     pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
 ) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, Vec<String>)> {
     use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -540,17 +549,13 @@ async fn create_webrtc_peer(
         })
     }));
 
-    // Create DataChannel on the agent side (agent is offerer)
-    let _dc_agent = pc.create_data_channel("oxmux-agent", None).await?;
+    // Agent creates DataChannel (agent is offerer, like parakeet-rs)
+    let _dc = pc.create_data_channel("oxmux", None).await?;
 
-    // Set remote description (browser's offer)
-    let offer = RTCSessionDescription::offer(offer_sdp.to_string())?;
-    pc.set_remote_description(offer).await?;
-
-    // Create answer
-    let answer = pc.create_answer(None).await?;
-    let answer_sdp = answer.sdp.clone();
-    pc.set_local_description(answer).await?;
+    // Create offer
+    let offer = pc.create_offer(None).await?;
+    let offer_sdp = offer.sdp.clone();
+    pc.set_local_description(offer).await?;
 
     // Wait for ICE gathering to complete (with timeout)
     tokio::select! {
@@ -566,8 +571,8 @@ async fn create_webrtc_peer(
         candidates.push(c);
     }
 
-    info!(candidates = candidates.len(), "WebRTC peer created");
-    Ok((pc, answer_sdp, candidates))
+    info!(candidates = candidates.len(), "WebRTC offer created");
+    Ok((pc, offer_sdp, candidates))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

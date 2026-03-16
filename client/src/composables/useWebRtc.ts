@@ -31,16 +31,18 @@ export interface IceConfig {
  * @param sendSignal - Function to send signaling messages via WS
  * @param onSignal - Register handler for incoming signaling messages via WS
  */
+/**
+ * Connect via WebRTC following the parakeet-rs pattern:
+ * Agent creates offer → browser creates answer.
+ */
 export async function connectWebRtc(
   iceConfig: IceConfig,
   sendSignal: (payload: Record<string, unknown>) => void,
   onSignal: (handler: (payload: Record<string, unknown>) => void) => void,
 ): Promise<WebRtcConnection> {
   return new Promise((resolve, reject) => {
-    // Add Google STUN as fallback + use provided TURN servers
     const servers = [
       { urls: ['stun:stun.l.google.com:19302'] },
-      { urls: ['stun:stun1.l.google.com:19302'] },
       ...iceConfig.iceServers,
     ]
     console.log('[oxmux-webrtc] creating PC with ICE servers:', servers.length)
@@ -50,133 +52,92 @@ export async function connectWebRtc(
     let closeHandler: (() => void) | null = null
     let dataChannel: RTCDataChannel | null = null
 
-    // Create DataChannel
-    const dc = pc.createDataChannel('oxmux', {
-      ordered: true,
-      protocol: 'msgpack',
-    })
+    // Agent creates the DataChannel — browser receives it via ondatachannel
+    pc.ondatachannel = (ev) => {
+      const dc = ev.channel
+      dc.binaryType = 'arraybuffer'
+      console.log('[oxmux-webrtc] DataChannel received:', dc.label)
 
-    dc.binaryType = 'arraybuffer'
+      dc.onopen = () => {
+        console.log('[oxmux-webrtc] DataChannel opened')
+        dataChannel = dc
+        resolve({
+          send: (msg: Record<string, unknown>) => {
+            if (dc.readyState === 'open') dc.send(encode(msg))
+          },
+          close: () => { dc.close(); pc.close() },
+          onMessage: (handler) => { messageHandler = handler },
+          onClose: (handler) => { closeHandler = handler },
+        })
+      }
 
-    dc.onopen = () => {
-      console.log('[oxmux-webrtc] DataChannel opened')
-      dataChannel = dc
-      resolve({
-        send: (msg: Record<string, unknown>) => {
-          if (dc.readyState === 'open') {
-            dc.send(encode(msg))
-          }
-        },
-        close: () => {
-          dc.close()
-          pc.close()
-        },
-        onMessage: (handler) => { messageHandler = handler },
-        onClose: (handler) => { closeHandler = handler },
-      })
-    }
+      dc.onmessage = (ev: MessageEvent) => {
+        try {
+          const msg = decode(new Uint8Array(ev.data)) as Record<string, unknown>
+          messageHandler?.(msg)
+        } catch (e) {
+          console.warn('[oxmux-webrtc] decode error:', e)
+        }
+      }
 
-    dc.onmessage = (ev: MessageEvent) => {
-      try {
-        const data = new Uint8Array(ev.data)
-        const msg = decode(data) as Record<string, unknown>
-        messageHandler?.(msg)
-      } catch (e) {
-        console.warn('[oxmux-webrtc] decode error:', e)
+      dc.onclose = () => {
+        console.log('[oxmux-webrtc] DataChannel closed')
+        closeHandler?.()
       }
     }
 
-    dc.onclose = () => {
-      console.log('[oxmux-webrtc] DataChannel closed')
-      closeHandler?.()
-    }
-
-    dc.onerror = (ev) => {
-      console.error('[oxmux-webrtc] DataChannel error:', ev)
-    }
-
-    // ICE candidate handling
+    // ICE candidates — send to agent via signaling
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
-        console.log('[oxmux-webrtc] sending browser ICE candidate:', ev.candidate.candidate)
+        console.log('[oxmux-webrtc] sending browser ICE:', ev.candidate.candidate.slice(0, 60))
         sendSignal({
           type: 'ice_candidate',
-          candidate: ev.candidate.candidate,
-          sdp_mid: ev.candidate.sdpMid,
-          sdp_mline_index: ev.candidate.sdpMLineIndex,
+          candidate: ev.candidate.toJSON(),
         })
-      } else {
-        console.log('[oxmux-webrtc] ICE gathering complete')
       }
     }
 
     pc.oniceconnectionstatechange = () => {
-      console.log('[oxmux-webrtc] ICE connection state:', pc.iceConnectionState)
-    }
-
-    pc.onicegatheringstatechange = () => {
-      console.log('[oxmux-webrtc] ICE gathering state:', pc.iceGatheringState)
+      console.log('[oxmux-webrtc] ICE state:', pc.iceConnectionState)
     }
 
     pc.onconnectionstatechange = () => {
-      console.log('[oxmux-webrtc] connection state:', pc.connectionState)
+      console.log('[oxmux-webrtc] connection:', pc.connectionState)
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
         closeHandler?.()
       }
     }
 
-    // Handle incoming signaling messages
+    // Handle signaling from agent
     onSignal(async (payload) => {
-      console.log('[oxmux-webrtc] signal received:', payload.type)
       try {
-        if (payload.type === 'answer' && pc.signalingState === 'have-local-offer') {
-          console.log('[oxmux-webrtc] setting remote description (answer)')
+        if (payload.type === 'offer') {
+          // Agent sent offer — set as remote, create answer
+          console.log('[oxmux-webrtc] received offer from agent')
           await pc.setRemoteDescription(new RTCSessionDescription({
-            type: 'answer',
+            type: 'offer',
             sdp: payload.sdp as string,
           }))
-          console.log('[oxmux-webrtc] remote description set, signalingState:', pc.signalingState)
+          const answer = await pc.createAnswer()
+          await pc.setLocalDescription(answer)
+          console.log('[oxmux-webrtc] sending answer, signalingState:', pc.signalingState)
+          sendSignal({ type: 'answer', sdp: answer.sdp })
         } else if (payload.type === 'ice_candidate') {
-          await pc.addIceCandidate(new RTCIceCandidate({
-            candidate: payload.candidate as string,
-            sdpMid: payload.sdp_mid as string || '0',
-            sdpMLineIndex: payload.sdp_mline_index as number || 0,
-          }))
+          const c = payload.candidate as any
+          await pc.addIceCandidate(new RTCIceCandidate(
+            typeof c === 'string'
+              ? { candidate: c, sdpMid: '0', sdpMLineIndex: 0 }
+              : c
+          ))
         }
       } catch (e) {
         console.error('[oxmux-webrtc] signaling error:', e)
       }
     })
 
-    // Wait for ICE gathering to complete, then send offer with all candidates in SDP
-    pc.createOffer()
-      .then(offer => pc.setLocalDescription(offer))
-      .then(() => {
-        console.log('[oxmux-webrtc] offer created, waiting for ICE gathering...')
-
-        let offerSent = false
-        const gatherDone = () => {
-          if (offerSent) return
-          offerSent = true
-          const sdp = pc.localDescription?.sdp || ''
-          const candidateCount = (sdp.match(/a=candidate/g) || []).length
-          console.log('[oxmux-webrtc] ICE gathering done, candidates in SDP:', candidateCount)
-          sendSignal({ type: 'offer', sdp })
-        }
-
-        if (pc.iceGatheringState === 'complete') {
-          gatherDone()
-        } else {
-          pc.addEventListener('icegatheringstatechange', () => {
-            if (pc.iceGatheringState === 'complete') gatherDone()
-          })
-          setTimeout(gatherDone, 10000)
-        }
-      })
-      .catch(e => {
-        console.error('[oxmux-webrtc] offer error:', e)
-        reject(e)
-      })
+    // Tell agent we're ready — agent will create offer
+    console.log('[oxmux-webrtc] sending ready signal')
+    sendSignal({ type: 'ready' })
 
     // Timeout
     setTimeout(() => {
