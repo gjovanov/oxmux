@@ -416,10 +416,16 @@ pub async fn handle_client_msg(
                         agent_id = %agent.id,
                         "transport upgrade ready"
                     );
-                    let agent_hostname = "agent.oxmux.app".to_string();
+                    // Map host IP to agent DNS name (*.oxmux.app wildcard cert)
+                    let agent_host_str = match agent.host.as_str() {
+                        "94.130.141.98" => "agent-mars.oxmux.app".to_string(),
+                        "5.9.157.226" => "agent-zeus.oxmux.app".to_string(),
+                        "5.9.157.221" => "agent-jupiter.oxmux.app".to_string(),
+                        _ => format!("agent.oxmux.app"), // fallback
+                    };
                     Some(ServerMsg::TransportUpgradeReady {
                         session_id,
-                        agent_host: agent_hostname,
+                        agent_host: agent_host_str,
                         agent_port: agent.quic_port,
                         agent_token: token,
                         target: Some(target),
