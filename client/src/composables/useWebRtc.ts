@@ -129,7 +129,7 @@ export async function connectWebRtc(
     onSignal(async (payload) => {
       console.log('[oxmux-webrtc] signal received:', payload.type)
       try {
-        if (payload.type === 'answer') {
+        if (payload.type === 'answer' && pc.signalingState === 'have-local-offer') {
           console.log('[oxmux-webrtc] setting remote description (answer)')
           await pc.setRemoteDescription(new RTCSessionDescription({
             type: 'answer',
@@ -154,7 +154,10 @@ export async function connectWebRtc(
       .then(() => {
         console.log('[oxmux-webrtc] offer created, waiting for ICE gathering...')
 
+        let offerSent = false
         const gatherDone = () => {
+          if (offerSent) return
+          offerSent = true
           const sdp = pc.localDescription?.sdp || ''
           const candidateCount = (sdp.match(/a=candidate/g) || []).length
           console.log('[oxmux-webrtc] ICE gathering done, candidates in SDP:', candidateCount)
@@ -167,7 +170,6 @@ export async function connectWebRtc(
           pc.addEventListener('icegatheringstatechange', () => {
             if (pc.iceGatheringState === 'complete') gatherDone()
           })
-          // Timeout after 10s
           setTimeout(gatherDone, 10000)
         }
       })
