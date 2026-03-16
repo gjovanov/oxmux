@@ -379,19 +379,39 @@ async fn handle_message(
         }
 
         "webrtc_ice" => {
-            let candidate_str = get_str(&msg, "candidate").to_string();
-            let sdp_mid = get_str(&msg, "sdp_mid").to_string();
-            info!(candidate = %candidate_str, "received ICE candidate from browser");
+            // Browser sends candidate as object: {candidate: "...", sdpMid: "0", sdpMLineIndex: 0}
+            let candidate_val = msg.as_map()
+                .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("candidate")))
+                .map(|(_, v)| v);
 
-            if let Some(pc) = webrtc_pc.lock().await.as_ref() {
-                let candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
-                    candidate: candidate_str,
-                    sdp_mid: Some(if sdp_mid.is_empty() { "0".to_string() } else { sdp_mid }),
-                    sdp_mline_index: Some(0),
-                    ..Default::default()
-                };
-                if let Err(e) = pc.add_ice_candidate(candidate).await {
-                    warn!(error = %e, "failed to add ICE candidate");
+            let (candidate_str, sdp_mid) = if let Some(val) = candidate_val {
+                if let Some(map) = val.as_map() {
+                    // Nested object: extract candidate and sdpMid fields
+                    let c = map.iter().find(|(k, _)| k.as_str() == Some("candidate"))
+                        .and_then(|(_, v)| v.as_str()).unwrap_or("").to_string();
+                    let m = map.iter().find(|(k, _)| k.as_str() == Some("sdpMid"))
+                        .and_then(|(_, v)| v.as_str()).unwrap_or("0").to_string();
+                    (c, m)
+                } else {
+                    // Plain string
+                    (val.as_str().unwrap_or("").to_string(), "0".to_string())
+                }
+            } else {
+                (String::new(), "0".to_string())
+            };
+
+            if !candidate_str.is_empty() {
+                info!(candidate = %candidate_str.get(..50).unwrap_or(&candidate_str), "received ICE candidate from browser");
+                if let Some(pc) = webrtc_pc.lock().await.as_ref() {
+                    let candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                        candidate: candidate_str,
+                        sdp_mid: Some(sdp_mid),
+                        sdp_mline_index: Some(0),
+                        ..Default::default()
+                    };
+                    if let Err(e) = pc.add_ice_candidate(candidate).await {
+                        warn!(error = %e, "failed to add ICE candidate");
+                    }
                 }
             }
         }
