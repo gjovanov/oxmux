@@ -565,21 +565,27 @@ fn get_u64(v: &rmpv::Value, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Find the first available tmux socket (user's tmux server).
+/// Find the user's tmux socket (prefer non-root).
 fn find_tmux_socket() -> Option<String> {
-    // Check /tmp/tmux-*/default
+    let mut sockets = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("tmux-") {
                 let sock = format!("/tmp/{}/default", name);
                 if std::path::Path::new(&sock).exists() {
-                    return Some(sock);
+                    // Extract uid from tmux-<uid>
+                    let uid: u32 = name.strip_prefix("tmux-")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    sockets.push((uid, sock));
                 }
             }
         }
     }
-    None
+    // Prefer non-root (uid > 0) socket
+    sockets.sort_by_key(|(uid, _)| if *uid == 0 { u32::MAX } else { *uid });
+    sockets.into_iter().next().map(|(_, s)| s)
 }
 
 fn build_window_tree(panes: &[crate::tmux_manager::PaneInfo]) -> Vec<serde_json::Value> {

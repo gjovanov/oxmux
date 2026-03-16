@@ -143,16 +143,22 @@ impl TmuxManager {
 }
 
 fn find_socket() -> Option<String> {
+    let mut sockets = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("tmux-") {
                 let sock = format!("/tmp/{}/default", name);
                 if std::path::Path::new(&sock).exists() {
-                    return Some(sock);
+                    let uid: u32 = name.strip_prefix("tmux-")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    sockets.push((uid, sock));
                 }
             }
         }
     }
-    None
+    // Prefer non-root user's socket
+    sockets.sort_by_key(|(uid, _)| if *uid == 0 { u32::MAX } else { *uid });
+    sockets.into_iter().next().map(|(_, s)| s)
 }

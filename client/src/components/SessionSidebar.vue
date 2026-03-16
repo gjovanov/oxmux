@@ -8,6 +8,7 @@
     <div class="connection-status" :class="store.connectionStatus" :data-testid="'connection-status-' + store.connectionStatus">
       <span class="status-dot" />
       {{ statusLabel }}
+      <span class="transport-mode">{{ transportLabel }}</span>
     </div>
 
     <div class="total-cost" v-if="store.totalCostUsd > 0" title="Total cost across all Claude sessions">
@@ -65,7 +66,7 @@
               <span class="agent-version">v{{ getAgentVersion(ms) }}</span>
             </div>
             <div class="transport-switch">
-              <span class="current-transport">{{ store.activeTransportMode }}</span>
+              <span class="current-transport" :class="store.activeTransportMode">{{ transportLabel }}</span>
               <button
                 v-if="store.activeTransportMode === 'ssh'"
                 class="action-btn p2p"
@@ -152,6 +153,16 @@ import { useTmuxStore } from '@/stores/tmux'
 
 const store = useTmuxStore()
 
+const transportLabel = computed(() => {
+  const mode = store.activeTransportMode
+  const labels: Record<string, string> = {
+    'ssh': 'WS → Server → SSH',
+    'quic_p2p': 'QUIC P2P → Agent',
+    'webrtc_p2p': 'WebRTC P2P → Agent',
+  }
+  return labels[mode] || mode
+})
+
 const statusLabel = computed(() => ({
   connected: 'Connected',
   connecting: 'Connecting...',
@@ -221,6 +232,7 @@ function claudeCost(paneId: string): string {
   border-bottom: 1px solid #313244;
 }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.transport-mode { margin-left: auto; font-size: 9px; opacity: 0.7; text-transform: uppercase; }
 .connection-status.connected { color: #a6e3a1; }
 .connection-status.connecting, .connection-status.reconnecting { color: #f9e2af; }
 .connection-status.disconnected { color: #f38ba8; }
@@ -310,7 +322,10 @@ function claudeCost(paneId: string): string {
 @keyframes pulse { 50% { opacity: 0.4; } }
 .agent-version { color: #585b70; margin-left: auto; }
 .transport-switch { display: flex; gap: 4px; margin-top: 4px; align-items: center; }
-.current-transport { font-size: 9px; color: #585b70; text-transform: uppercase; }
+.current-transport { font-size: 9px; color: #585b70; text-transform: uppercase; padding: 1px 4px; border-radius: 3px; }
+.current-transport.ssh { color: #a6adc8; }
+.current-transport.quic_p2p { color: #cba6f7; background: #2d1b4e; }
+.current-transport.webrtc_p2p { color: #fab387; background: #3d2b1b; }
 .action-btn.p2p { background: #cba6f7; color: #1e1e2e; }
 .action-btn.p2p:hover { background: #b4befe; }
 .action-btn.install { background: #89b4fa; color: #1e1e2e; margin-left: auto; }
