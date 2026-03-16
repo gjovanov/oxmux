@@ -105,6 +105,10 @@ async fn handle_session(
     let (output_tx, mut output_rx) = mpsc::channel::<(String, Bytes)>(512);
     let ctrl_session_name = session_name.to_string();
 
+    // Store WebRTC peer connection for ICE candidate handling
+    let webrtc_pc: Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     let ctrl_handle = tokio::spawn(async move {
         if let Err(e) = run_control_mode(&ctrl_session_name, output_tx).await {
             warn!(error = %e, "control mode ended");
@@ -140,7 +144,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -283,6 +287,7 @@ async fn handle_message(
     data: &[u8],
     tmux_mgr: &TmuxManager,
     send: &mut wtransport::SendStream,
+    webrtc_pc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
     let t = get_str(&msg, "t");
@@ -334,7 +339,9 @@ async fn handle_message(
 
             let tmux_clone = tmux_mgr.pane_outputs.clone();
             match create_webrtc_peer(&sdp, tmux_clone).await {
-                Ok((answer_sdp, ice_candidates)) => {
+                Ok((pc, answer_sdp, ice_candidates)) => {
+                    // Store the peer connection for ICE candidate handling
+                    *webrtc_pc.lock().await = Some(pc);
                     // Send answer back over WebTransport
                     send_msg(send, &serde_json::json!({
                         "t": "webrtc_answer",
@@ -363,12 +370,21 @@ async fn handle_message(
         }
 
         "webrtc_ice" => {
-            // ICE candidate from browser (relayed over WebTransport)
-            let candidate = get_str(&msg, "candidate").to_string();
+            let candidate_str = get_str(&msg, "candidate").to_string();
             let sdp_mid = get_str(&msg, "sdp_mid").to_string();
-            debug!(candidate = %candidate, "received ICE candidate");
-            // Note: in a full implementation, we'd store the peer connection
-            // and add candidates to it. For now, ICE gathering completes server-side.
+            info!(candidate = %candidate_str, "received ICE candidate from browser");
+
+            if let Some(pc) = webrtc_pc.lock().await.as_ref() {
+                let candidate = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                    candidate: candidate_str,
+                    sdp_mid: Some(if sdp_mid.is_empty() { "0".to_string() } else { sdp_mid }),
+                    sdp_mline_index: Some(0),
+                    ..Default::default()
+                };
+                if let Err(e) = pc.add_ice_candidate(candidate).await {
+                    warn!(error = %e, "failed to add ICE candidate");
+                }
+            }
         }
 
         other => {
@@ -387,7 +403,7 @@ async fn handle_message(
 async fn create_webrtc_peer(
     offer_sdp: &str,
     pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
-) -> Result<(String, Vec<String>)> {
+) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, Vec<String>)> {
     use webrtc::api::interceptor_registry::register_default_interceptors;
     use webrtc::api::media_engine::MediaEngine;
     use webrtc::api::APIBuilder;
@@ -409,10 +425,21 @@ async fn create_webrtc_peer(
         .build();
 
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            ..Default::default()
-        }],
+        ice_servers: vec![
+            RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                ..Default::default()
+            },
+            // Add TURN servers for NAT traversal
+            RTCIceServer {
+                urls: vec![
+                    "turn:94.130.141.98:3478".to_string(),
+                    "turn:5.9.157.226:3478".to_string(),
+                    "turn:5.9.157.221:3478".to_string(),
+                ],
+                ..Default::default()
+            },
+        ],
         ..Default::default()
     };
 
@@ -508,7 +535,7 @@ async fn create_webrtc_peer(
     }
 
     info!(candidates = candidates.len(), "WebRTC peer created");
-    Ok((answer_sdp, candidates))
+    Ok((pc, answer_sdp, candidates))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

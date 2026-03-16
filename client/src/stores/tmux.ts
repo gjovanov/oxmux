@@ -379,17 +379,21 @@ export const useTmuxStore = defineStore('tmux', () => {
       }
       case 'sess_connected': {
         const session = msg.session as ManagedSession
+        // Only update managed sessions if this is a known session (not from P2P agent)
         const idx = managedSessions.value.findIndex(s => s.id === session.id)
-        if (idx >= 0) managedSessions.value[idx] = session
-        if (session.tmux_sessions?.length) {
-          sessions.value = session.tmux_sessions
+        if (idx >= 0) {
+          managedSessions.value[idx] = session
+          if (session.tmux_sessions?.length) {
+            sessions.value = session.tmux_sessions
+          }
+          activeSessionId.value = session.id
+          // Auto-check agent status for SSH sessions
+          const host = (session.transport?.backend as any)?.host
+          if (host && session.transport?.backend?.type === 'ssh') {
+            checkAgentStatus(host)
+          }
         }
-        activeSessionId.value = session.id
-        // Auto-check agent status for SSH sessions
-        const host = (session.transport?.backend as any)?.host
-        if (host && session.transport?.backend?.type === 'ssh') {
-          checkAgentStatus(host)
-        }
+        // If from P2P agent (unknown ID), don't overwrite state
         break
       }
       case 'sess_disconnected': {
