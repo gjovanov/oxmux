@@ -71,9 +71,34 @@ async fn handle_session(
     let auth_ok = rmp_serde::to_vec_named(&serde_json::json!({"t": "auth_ok"}))?;
     send.write_all(&auth_ok).await?;
 
-    // Start tmux control mode for the session
-    // Find which tmux session to attach to (use the first available, or create one)
-    let session_name = "oxmux-p2p";
+    // Wait for client to tell us which tmux session to use
+    // Read the first message which should be sess_connect with a name
+    let mut first_msg_buf = vec![0u8; 65536];
+    let mut first_buf = Vec::new();
+
+    // Read length-prefixed first message
+    loop {
+        match recv.read(&mut first_msg_buf).await {
+            Ok(Some(n)) if n > 0 => {
+                first_buf.extend_from_slice(&first_msg_buf[..n]);
+                if first_buf.len() >= 4 {
+                    let msg_len = u32::from_be_bytes([first_buf[0], first_buf[1], first_buf[2], first_buf[3]]) as usize;
+                    if first_buf.len() >= 4 + msg_len {
+                        break;
+                    }
+                }
+            }
+            _ => anyhow::bail!("connection closed before first message"),
+        }
+    }
+
+    // Parse first message to get session name
+    let msg_len = u32::from_be_bytes([first_buf[0], first_buf[1], first_buf[2], first_buf[3]]) as usize;
+    let first_msg: rmpv::Value = rmpv::decode::read_value(&mut &first_buf[4..4 + msg_len])?;
+    let session_name = get_str(&first_msg, "name");
+    let session_name = if session_name.is_empty() { "default" } else { session_name };
+
+    info!(session = %session_name, "attaching to tmux session");
     tmux_mgr.ensure_session(session_name)?;
 
     // Spawn tmux -CC attach for live output streaming
@@ -167,14 +192,17 @@ async fn run_control_mode(
 ) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
 
-    // Use script(1) to allocate a PTY for tmux -CC
-    // tmux requires a terminal; script provides one when running from systemd
+    // Use user's tmux socket
+    let tmux_socket = find_tmux_socket();
+    let tmux_cmd = if let Some(ref sock) = tmux_socket {
+        format!("tmux -S {} -CC attach -t {}", sock, session_name)
+    } else {
+        format!("tmux -CC attach -t {}", session_name)
+    };
+    info!(cmd = %tmux_cmd, "starting control mode");
+
     let mut child = tokio::process::Command::new("script")
-        .args([
-            "-q", "-c",
-            &format!("tmux -CC attach -t {}", session_name),
-            "/dev/null",
-        ])
+        .args(["-q", "-c", &tmux_cmd, "/dev/null"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -269,11 +297,12 @@ async fn handle_message(
             let pane = get_str(&msg, "pane");
             let bytes = get_bytes(&msg, "data");
             if !bytes.is_empty() && !pane.is_empty() {
-                // Send input via tmux send-keys -H
                 let hex: String = bytes.iter().map(|b| format!("{:02x} ", b)).collect();
-                let _ = std::process::Command::new("tmux")
-                    .args(["send-keys", "-t", pane, "-H", hex.trim()])
-                    .output();
+                let socket = find_tmux_socket();
+                let mut cmd = std::process::Command::new("tmux");
+                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+                cmd.args(["send-keys", "-t", pane, "-H", hex.trim()]);
+                let _ = cmd.output();
             }
         }
 
@@ -507,6 +536,23 @@ fn get_u64(v: &rmpv::Value, key: &str) -> u64 {
         .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
         .and_then(|(_, v)| v.as_u64())
         .unwrap_or(0)
+}
+
+/// Find the first available tmux socket (user's tmux server).
+fn find_tmux_socket() -> Option<String> {
+    // Check /tmp/tmux-*/default
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("tmux-") {
+                let sock = format!("/tmp/{}/default", name);
+                if std::path::Path::new(&sock).exists() {
+                    return Some(sock);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn build_window_tree(panes: &[crate::tmux_manager::PaneInfo]) -> Vec<serde_json::Value> {

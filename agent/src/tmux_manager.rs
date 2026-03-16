@@ -1,5 +1,4 @@
 //! Local tmux management for the agent.
-//! Creates sessions, lists panes, streams output via control mode, routes input.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -7,9 +6,8 @@ use dashmap::DashMap;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{info};
 
-/// Pane info returned to clients.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaneInfo {
     pub session_id: String,
@@ -28,7 +26,6 @@ pub struct PaneInfo {
 }
 
 pub struct TmuxManager {
-    /// Per-pane output broadcast channels
     pub pane_outputs: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
 }
 
@@ -39,22 +36,29 @@ impl TmuxManager {
         }
     }
 
-    /// Ensure a tmux session exists.
+    fn tmux_cmd() -> Command {
+        let mut cmd = Command::new("tmux");
+        if let Some(sock) = find_socket() {
+            cmd.arg("-S").arg(sock);
+        }
+        cmd
+    }
+
     pub fn ensure_session(&self, name: &str) -> Result<()> {
-        let check = Command::new("tmux")
+        let status = Self::tmux_cmd()
             .args(["has-session", "-t", name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
 
-        match check {
+        match status {
             Ok(s) if s.success() => {
                 info!(session = name, "tmux session already exists");
                 Ok(())
             }
             _ => {
                 info!(session = name, "creating new tmux session");
-                let status = Command::new("tmux")
+                let status = Self::tmux_cmd()
                     .args(["new-session", "-d", "-s", name, "-x", "80", "-y", "24"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
@@ -68,9 +72,8 @@ impl TmuxManager {
         }
     }
 
-    /// List panes for a given session.
     pub fn list_panes(&self, session_name: &str) -> Result<Vec<PaneInfo>> {
-        let output = Command::new("tmux")
+        let output = Self::tmux_cmd()
             .args([
                 "list-panes", "-t", session_name, "-s",
                 "-F",
@@ -89,11 +92,8 @@ impl TmuxManager {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split("|||").collect();
-            if parts.len() < 12 {
-                continue;
-            }
-
-            let pane_cmd = parts[10].to_string();
+            if parts.len() < 12 { continue; }
+            let cmd = parts[10].to_string();
             panes.push(PaneInfo {
                 session_id: parts[0].to_string(),
                 session_name: parts[1].to_string(),
@@ -105,38 +105,28 @@ impl TmuxManager {
                 pane_index: parts[7].parse().unwrap_or(0),
                 cols: parts[8].parse().unwrap_or(80),
                 rows: parts[9].parse().unwrap_or(24),
-                is_claude: pane_cmd.contains("claude"),
-                current_command: pane_cmd,
+                is_claude: cmd.contains("claude"),
+                current_command: cmd,
                 is_active: parts[11] == "1",
             });
         }
-
         Ok(panes)
     }
 
-    /// Send input to a pane via send-keys -H (hex).
     pub fn send_input(&self, pane_id: &str, data: &[u8]) -> Result<()> {
         let hex: String = data.iter().map(|b| format!("{:02x} ", b)).collect();
-        let status = Command::new("tmux")
+        Self::tmux_cmd()
             .args(["send-keys", "-t", pane_id, "-H", hex.trim()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .context("failed to run tmux send-keys")?;
-        if !status.success() {
-            anyhow::bail!("tmux send-keys failed");
-        }
         Ok(())
     }
 
-    /// Resize a pane.
     pub fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> Result<()> {
-        Command::new("tmux")
-            .args([
-                "resize-pane", "-t", pane_id,
-                "-x", &cols.to_string(),
-                "-y", &rows.to_string(),
-            ])
+        Self::tmux_cmd()
+            .args(["resize-pane", "-t", pane_id, "-x", &cols.to_string(), "-y", &rows.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -144,11 +134,25 @@ impl TmuxManager {
         Ok(())
     }
 
-    /// Get or create a broadcast channel for a pane.
     pub fn get_or_create_pane_channel(&self, pane_id: &str) -> broadcast::Sender<Bytes> {
         self.pane_outputs
             .entry(pane_id.to_string())
             .or_insert_with(|| broadcast::channel(4096).0)
             .clone()
     }
+}
+
+fn find_socket() -> Option<String> {
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("tmux-") {
+                let sock = format!("/tmp/{}/default", name);
+                if std::path::Path::new(&sock).exists() {
+                    return Some(sock);
+                }
+            }
+        }
+    }
+    None
 }

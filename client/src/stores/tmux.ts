@@ -551,6 +551,12 @@ export const useTmuxStore = defineStore('tmux', () => {
 
       console.log('[oxmux] QUIC P2P connected!')
 
+      // Tell agent which tmux session to attach to
+      const activeSess = managedSessions.value.find(s => s.id === activeSessionId.value)
+      if (activeSess) {
+        sendMsg({ t: 'sess_connect', name: activeSess.name })
+      }
+
       // Re-subscribe all active panes on the new transport
       for (const paneId of paneHandlers.keys()) {
         console.log('[oxmux] re-subscribing pane on P2P:', paneId)
