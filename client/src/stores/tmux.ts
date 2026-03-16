@@ -237,16 +237,12 @@ export const useTmuxStore = defineStore('tmux', () => {
       const signalResolvers = new Map<string, (payload: Record<string, unknown>) => void>()
 
       quicConn.onMessage((msg) => {
-        if (msg.t === 'webrtc_offer' || msg.t === 'webrtc_answer' || msg.t === 'webrtc_ice' || msg.t === 'webrtc_error') {
+        if (msg.t === 'webrtc_offer' || msg.t === 'webrtc_error') {
           console.log('[oxmux] WebRTC signaling:', msg.t)
           const handler = signalResolvers.get('signal')
           if (handler) {
             if (msg.t === 'webrtc_offer') {
               handler({ type: 'offer', sdp: msg.sdp })
-            } else if (msg.t === 'webrtc_answer') {
-              handler({ type: 'answer', sdp: msg.sdp })
-            } else if (msg.t === 'webrtc_ice') {
-              handler({ type: 'ice_candidate', candidate: msg.candidate })
             }
           }
         } else {
@@ -271,13 +267,11 @@ export const useTmuxStore = defineStore('tmux', () => {
       const conn = await connectWebRtc(
         iceConfig,
         (payload) => {
-          // Send signaling via QUIC to agent
+          // Vanilla ICE: only offer/answer, no separate ICE messages
           if (payload.type === 'ready') {
             quicConn.send({ t: 'webrtc_ready' })
           } else if (payload.type === 'answer') {
             quicConn.send({ t: 'webrtc_answer', sdp: payload.sdp })
-          } else if (payload.type === 'ice_candidate') {
-            quicConn.send({ t: 'webrtc_ice', candidate: payload.candidate })
           }
         },
         (handler) => {

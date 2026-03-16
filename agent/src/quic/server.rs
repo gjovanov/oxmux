@@ -362,25 +362,16 @@ async fn handle_message(
             let tmux_clone = tmux_mgr.pane_outputs.clone();
             let dc_store = webrtc_dc.clone();
             match create_webrtc_offer(tmux_clone, dc_store).await {
-                Ok((pc, offer_sdp, ice_candidates)) => {
+                Ok((pc, offer_sdp, candidate_count)) => {
                     *webrtc_pc.lock().await = Some(pc);
 
+                    // Vanilla ICE: all candidates already in the SDP, no separate messages
                     send_msg(send, &serde_json::json!({
                         "t": "webrtc_offer",
                         "sdp": offer_sdp,
                     })).await?;
 
-                    for candidate in &ice_candidates {
-                        send_msg(send, &serde_json::json!({
-                            "t": "webrtc_ice",
-                            "candidate": serde_json::json!({
-                                "candidate": candidate,
-                                "sdpMid": "0",
-                                "sdpMLineIndex": 0,
-                            }),
-                        })).await?;
-                    }
-                    info!(candidates = ice_candidates.len(), "WebRTC offer + candidates sent");
+                    info!(candidates = candidate_count, "WebRTC offer sent (vanilla ICE)");
                 }
                 Err(e) => {
                     warn!(error = %e, "WebRTC offer creation failed");
@@ -393,24 +384,16 @@ async fn handle_message(
         }
 
         "webrtc_answer" => {
+            // Vanilla ICE: browser's answer SDP contains all candidates
             let sdp = get_str(&msg, "sdp").to_string();
-            info!("Received WebRTC answer from browser");
+            let candidates = sdp.matches("a=candidate").count();
+            info!(candidates, "Received WebRTC answer from browser (vanilla ICE)");
             if let Some(pc) = webrtc_pc.lock().await.as_ref() {
                 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
                 if let Err(e) = pc.set_remote_description(RTCSessionDescription::answer(sdp)?).await {
                     warn!(error = %e, "Failed to set remote description");
                 } else {
-                    info!("WebRTC remote description (answer) set");
-                    webrtc_remote_set.store(true, std::sync::atomic::Ordering::SeqCst);
-
-                    // Process queued candidates
-                    let mut pending = webrtc_pending_candidates.lock().await;
-                    info!(count = pending.len(), "processing queued browser ICE candidates");
-                    for c in pending.drain(..) {
-                        if let Err(e) = pc.add_ice_candidate(c).await {
-                            warn!(error = %e, "failed to add queued candidate");
-                        }
-                    }
+                    info!("WebRTC remote description set — ICE should start checking");
                 }
             }
         }
@@ -474,11 +457,11 @@ async fn handle_message(
 // ── WebRTC P2P ──────────────────────────────────────────────────────────
 
 /// Create a WebRTC peer connection with DataChannel for terminal I/O.
-/// Agent creates the offer (parakeet-rs pattern: server is offerer).
+/// Agent creates the offer with all ICE candidates embedded (vanilla ICE).
 async fn create_webrtc_offer(
     pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
     dc_store: Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
-) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, Vec<String>)> {
+) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, usize)> {
     use webrtc::api::interceptor_registry::register_default_interceptors;
     use webrtc::api::media_engine::MediaEngine;
     use webrtc::api::APIBuilder;
@@ -549,22 +532,15 @@ async fn create_webrtc_offer(
 
     let pc = Arc::new(api.new_peer_connection(config).await?);
 
-    // Collect ICE candidates
-    let (ice_tx, mut ice_rx) = mpsc::channel::<String>(32);
+    // Wait for ICE gathering complete
     let ice_done = Arc::new(tokio::sync::Notify::new());
     let ice_done_clone = ice_done.clone();
 
     pc.on_ice_candidate(Box::new(move |candidate| {
-        let tx = ice_tx.clone();
         let done = ice_done_clone.clone();
         Box::pin(async move {
-            match candidate {
-                Some(c) => {
-                    if let Ok(json) = c.to_json() {
-                        let _ = tx.send(json.candidate).await;
-                    }
-                }
-                None => done.notify_one(), // gathering complete
+            if candidate.is_none() {
+                done.notify_one(); // gathering complete
             }
         })
     }));
@@ -627,22 +603,22 @@ async fn create_webrtc_offer(
     let offer_sdp = offer.sdp.clone();
     pc.set_local_description(offer).await?;
 
-    // Wait for ICE gathering to complete (with timeout)
+    // Wait for ICE gathering to complete (vanilla ICE)
     tokio::select! {
         _ = ice_done.notified() => {}
-        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-            warn!("ICE gathering timed out");
+        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+            warn!("ICE gathering timed out after 10s");
         }
     }
 
-    // Collect candidates
-    let mut candidates = Vec::new();
-    while let Ok(c) = ice_rx.try_recv() {
-        candidates.push(c);
-    }
+    // Get the offer SDP with all candidates embedded
+    let local_desc = pc.local_description().await
+        .ok_or_else(|| anyhow::anyhow!("no local description after gathering"))?;
+    let final_sdp = local_desc.sdp;
+    let candidate_count = final_sdp.matches("a=candidate").count();
 
-    info!(candidates = candidates.len(), "WebRTC offer created");
-    Ok((pc, offer_sdp, candidates))
+    info!(candidates = candidate_count, "WebRTC offer created (vanilla ICE)");
+    Ok((pc, final_sdp, candidate_count))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
