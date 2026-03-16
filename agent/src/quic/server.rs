@@ -113,6 +113,10 @@ async fn handle_session(
     let webrtc_pending_candidates: Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
+    // Shared DataChannel for sending output when WebRTC is active
+    let webrtc_dc: Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     let ctrl_handle = tokio::spawn(async move {
         if let Err(e) = run_control_mode(&ctrl_session_name, output_tx).await {
             warn!(error = %e, "control mode ended");
@@ -148,7 +152,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &webrtc_dc).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -156,7 +160,7 @@ async fn handle_session(
         tokio::select! {
             biased;
 
-            // Forward control mode output to client
+            // Forward control mode output to client (QUIC or WebRTC DataChannel)
             output = output_rx.recv() => {
                 match output {
                     Some((pane_id, data)) => {
@@ -165,8 +169,23 @@ async fn handle_session(
                             "pane": pane_id,
                             "data": data.to_vec(),
                         });
-                        if send_msg(&mut send, &reply).await.is_err() {
-                            break;
+
+                        // Try DataChannel first (WebRTC P2P), fall back to QUIC stream
+                        let sent_via_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
+                            if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                                let encoded = rmp_serde::to_vec_named(&reply).unwrap_or_default();
+                                dc.send(&Bytes::from(encoded)).await.is_ok()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !sent_via_dc {
+                            if send_msg(&mut send, &reply).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     None => {
@@ -294,6 +313,7 @@ async fn handle_message(
     webrtc_pc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>>,
     webrtc_remote_set: &Arc<std::sync::atomic::AtomicBool>,
     webrtc_pending_candidates: &Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>>,
+    webrtc_dc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
     let t = get_str(&msg, "t");
@@ -340,7 +360,8 @@ async fn handle_message(
             info!("Browser ready for WebRTC, agent creating offer");
 
             let tmux_clone = tmux_mgr.pane_outputs.clone();
-            match create_webrtc_offer(tmux_clone).await {
+            let dc_store = webrtc_dc.clone();
+            match create_webrtc_offer(tmux_clone, dc_store).await {
                 Ok((pc, offer_sdp, ice_candidates)) => {
                     *webrtc_pc.lock().await = Some(pc);
 
@@ -456,6 +477,7 @@ async fn handle_message(
 /// Agent creates the offer (parakeet-rs pattern: server is offerer).
 async fn create_webrtc_offer(
     pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
+    dc_store: Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
 ) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, Vec<String>)> {
     use webrtc::api::interceptor_registry::register_default_interceptors;
     use webrtc::api::media_engine::MediaEngine;
@@ -548,10 +570,14 @@ async fn create_webrtc_offer(
     }));
 
     // Handle DataChannel from browser
+    let dc_store_clone = dc_store.clone();
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         let pane_outputs = pane_outputs.clone();
+        let dc_store = dc_store_clone.clone();
         Box::pin(async move {
             info!(label = %dc.label(), "WebRTC DataChannel opened");
+            // Store DC for output streaming
+            *dc_store.lock().await = Some(dc.clone());
 
             dc.on_message(Box::new(move |msg: DataChannelMessage| {
                 let data = msg.data.to_vec();
