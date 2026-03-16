@@ -184,13 +184,14 @@ export async function connectWebRtc(
     console.log('[oxmux-webrtc] sending ready signal')
     sendSignal({ type: 'ready' })
 
-    // Timeout
+    // Timeout (60s for DTLS + ICE to complete)
     setTimeout(() => {
       if (!dataChannel) {
+        console.log('[oxmux-webrtc] timeout — final ICE:', pc.iceConnectionState, 'conn:', pc.connectionState)
         reject(new Error('WebRTC connection timeout'))
         pc.close()
       }
-    }, 30000)
+    }, 60000)
   })
 }
 
