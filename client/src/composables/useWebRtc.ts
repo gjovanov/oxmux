@@ -48,6 +48,15 @@ export async function connectWebRtc(
     console.log('[oxmux-webrtc] creating PC with ICE servers:', servers.length)
     const pc = new RTCPeerConnection({ iceServers: servers })
 
+    // Add a dummy audio transceiver to force Chrome to gather ICE candidates
+    // (DataChannel-only offers may not trigger ICE gathering in some Chrome versions)
+    try {
+      pc.addTransceiver('audio', { direction: 'recvonly' })
+      console.log('[oxmux-webrtc] added dummy audio transceiver for ICE')
+    } catch (e) {
+      console.warn('[oxmux-webrtc] could not add transceiver:', e)
+    }
+
     let messageHandler: ((msg: Record<string, unknown>) => void) | null = null
     let closeHandler: (() => void) | null = null
     let dataChannel: RTCDataChannel | null = null
