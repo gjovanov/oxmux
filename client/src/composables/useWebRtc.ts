@@ -148,39 +148,33 @@ export async function connectWebRtc(
       }
     })
 
-    // Create and send offer
+    // Wait for ICE gathering to complete, then send offer with all candidates in SDP
     pc.createOffer()
-      .then(offer => {
-        console.log('[oxmux-webrtc] offer created, setting local description')
-        return pc.setLocalDescription(offer)
-      })
+      .then(offer => pc.setLocalDescription(offer))
       .then(() => {
-        const sdp = pc.localDescription?.sdp || ''
-        const candidateCount = (sdp.match(/a=candidate/g) || []).length
-        console.log('[oxmux-webrtc] local description set, signalingState:', pc.signalingState,
-          'candidates in SDP:', candidateCount)
-        if (candidateCount > 0) {
-          console.log('[oxmux-webrtc] offer has bundled candidates (non-trickle)')
+        console.log('[oxmux-webrtc] offer created, waiting for ICE gathering...')
+
+        const gatherDone = () => {
+          const sdp = pc.localDescription?.sdp || ''
+          const candidateCount = (sdp.match(/a=candidate/g) || []).length
+          console.log('[oxmux-webrtc] ICE gathering done, candidates in SDP:', candidateCount)
+          sendSignal({ type: 'offer', sdp })
         }
-        sendSignal({
-          type: 'offer',
-          sdp,
-        })
+
+        if (pc.iceGatheringState === 'complete') {
+          gatherDone()
+        } else {
+          pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete') gatherDone()
+          })
+          // Timeout after 10s
+          setTimeout(gatherDone, 10000)
+        }
       })
       .catch(e => {
-        console.error('[oxmux-webrtc] offer/setLocal error:', e)
+        console.error('[oxmux-webrtc] offer error:', e)
         reject(e)
       })
-
-    // Check ICE state after 5 seconds
-    setTimeout(() => {
-      console.log('[oxmux-webrtc] 5s check — ICE:', pc.iceConnectionState,
-        'gathering:', pc.iceGatheringState,
-        'signaling:', pc.signalingState,
-        'connection:', pc.connectionState,
-        'localCandidates:', pc.localDescription?.sdp?.match(/a=candidate/g)?.length || 0,
-        'remoteCandidates:', pc.remoteDescription?.sdp?.match(/a=candidate/g)?.length || 0)
-    }, 5000)
 
     // Timeout
     setTimeout(() => {
