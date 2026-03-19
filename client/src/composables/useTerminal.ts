@@ -30,7 +30,6 @@ export function useTerminal(
   const fitAddon = new FitAddon()
   const searchAddon = new SearchAddon()
   let resizeObserver: ResizeObserver | null = null
-  let pasteHandler: ((e: ClipboardEvent) => void) | null = null
   let contextMenuHandler: ((e: MouseEvent) => void) | null = null
 
   function mount() {
@@ -60,25 +59,10 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Let browser handle Ctrl+V/Cmd+V natively (triggers paste event)
-    t.attachCustomKeyEventHandler((ev) => {
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'v') {
-        return false // let browser handle paste
-      }
-      return true
-    })
+    // Ctrl+V/Cmd+V paste: xterm.js handles this natively via its internal textarea.
+    // Pasted text fires through t.onData() which sends to server — no extra handling needed.
 
-    // Handle paste event on the terminal container
-    pasteHandler = (e: ClipboardEvent) => {
-      e.preventDefault()
-      const text = e.clipboardData?.getData('text/plain')
-      if (text && paneId.value) {
-        store.sendInput(paneId.value, new TextEncoder().encode(text))
-      }
-    }
-    containerRef.value.addEventListener('paste', pasteHandler)
-
-    // Right-click paste
+    // Right-click paste (not built into xterm.js)
     contextMenuHandler = async (e: MouseEvent) => {
       e.preventDefault()
       try {
@@ -147,9 +131,8 @@ export function useTerminal(
 
   function dispose() {
     resizeObserver?.disconnect()
-    if (containerRef.value) {
-      if (pasteHandler) containerRef.value.removeEventListener('paste', pasteHandler)
-      if (contextMenuHandler) containerRef.value.removeEventListener('contextmenu', contextMenuHandler as EventListener)
+    if (containerRef.value && contextMenuHandler) {
+      containerRef.value.removeEventListener('contextmenu', contextMenuHandler as EventListener)
     }
     store.unsubscribePane(paneId.value)
     term.value?.dispose()
