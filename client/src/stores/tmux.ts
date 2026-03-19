@@ -231,6 +231,12 @@ export const useTmuxStore = defineStore('tmux', () => {
         }
       }
       sendMsg({ t: 'sess_list' })
+
+      // Restore previously connected sessions after reconnect
+      for (const sid of connectedSessionIds.value) {
+        console.log('[oxmux] restoring session after reconnect:', sid)
+        sendMsg({ t: 'sess_connect', session_id: sid })
+      }
     }
 
     socket.onmessage = (ev: MessageEvent<ArrayBuffer>) => {

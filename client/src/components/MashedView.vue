@@ -63,7 +63,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useTmuxStore } from '@/stores/tmux'
 import { qualifyPaneId, type QualifiedPaneId } from '@/utils/paneId'
 import MashedCell from '@/components/MashedCell.vue'
@@ -173,6 +173,41 @@ onMounted(() => autoFill())
 // Close picker on outside click
 function onDocClick() { pickerIndex.value = null }
 onMounted(() => document.addEventListener('click', onDocClick))
+onUnmounted(() => document.removeEventListener('click', onDocClick))
+
+// Keyboard navigation: Ctrl+Arrow moves between grid cells
+function onKeyDown(e: KeyboardEvent) {
+  if (!e.ctrlKey || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+
+  const currentQid = store.activePane
+  const occupiedSlots = gridSlots.value.map((s, i) => s ? i : -1).filter(i => i >= 0)
+  if (occupiedSlots.length === 0) return
+
+  const currentIdx = currentQid
+    ? gridSlots.value.findIndex(s => s?.qualifiedId === currentQid)
+    : -1
+
+  let nextIdx = currentIdx
+  const g = gridSize.value
+
+  switch (e.key) {
+    case 'ArrowRight': nextIdx = currentIdx + 1; break
+    case 'ArrowLeft': nextIdx = currentIdx - 1; break
+    case 'ArrowDown': nextIdx = currentIdx + g; break
+    case 'ArrowUp': nextIdx = currentIdx - g; break
+  }
+
+  // Wrap and find next occupied cell
+  if (nextIdx < 0 || nextIdx >= totalSlots.value) return
+  const slot = gridSlots.value[nextIdx]
+  if (slot) {
+    e.preventDefault()
+    onCellFocus(slot)
+  }
+}
+
+onMounted(() => document.addEventListener('keydown', onKeyDown))
+onUnmounted(() => document.removeEventListener('keydown', onKeyDown))
 </script>
 
 <style scoped>
