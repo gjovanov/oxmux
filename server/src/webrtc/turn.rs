@@ -73,22 +73,28 @@ pub struct IceServer {
 }
 
 pub fn build_ice_config(credentials: &TurnCredentials) -> IceConfig {
+    // Plain TURN URLs (UDP relay)
+    let turn_urls: Vec<String> = credentials.uris.iter()
+        .filter(|u| u.starts_with("turn:"))
+        .cloned()
+        .collect();
+
     IceConfig {
         ice_servers: vec![
-            // STUN-only entries (no credentials needed)
+            // Google STUN (reliable, always reachable)
             IceServer {
-                urls: credentials
-                    .uris
-                    .iter()
-                    .filter(|u| u.starts_with("turn:"))
-                    .map(|u| u.replacen("turn:", "stun:", 1))
-                    .collect(),
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
                 username: None,
                 credential: None,
             },
-            // TURN + TURNS entries (with credentials)
+            // TURN over UDP (plain) + TURNS over TLS on port 443 via domain name
+            // Using domain name for TURNS since it has a valid TLS certificate
             IceServer {
-                urls: credentials.uris.clone(),
+                urls: {
+                    let mut urls = turn_urls;
+                    urls.push("turns:coturn.roomler.live:443?transport=tcp".to_string());
+                    urls
+                },
                 username: Some(credentials.username.clone()),
                 credential: Some(credentials.credential.clone()),
             },
@@ -149,9 +155,12 @@ mod tests {
         let creds = generate_turn_credentials(&test_config(), "u").unwrap();
         let ice = build_ice_config(&creds);
         assert_eq!(ice.ice_servers.len(), 2);
-        // First entry: STUN (no credentials)
+        // First entry: Google STUN (no credentials)
         assert!(ice.ice_servers[0].username.is_none());
-        // Second entry: TURN+TURNS (with credentials)
+        assert!(ice.ice_servers[0].urls[0].contains("stun.l.google.com"));
+        // Second entry: TURN + TURNS with credentials
         assert!(ice.ice_servers[1].username.is_some());
+        assert!(ice.ice_servers[1].urls.iter().any(|u| u.starts_with("turn:")));
+        assert!(ice.ice_servers[1].urls.iter().any(|u| u.contains("coturn.roomler.live")));
     }
 }

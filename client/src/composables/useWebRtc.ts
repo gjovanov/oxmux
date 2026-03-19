@@ -1,7 +1,10 @@
 /**
  * WebRTC DataChannel connection composable.
- * Uses full vanilla ICE (no trickle) — all candidates embedded in SDP.
- * Agent creates offer, browser creates answer.
+ * Browser-as-offerer with trickle ICE for fast connection:
+ *   1. Browser creates DataChannel + offer, sends IMMEDIATELY (0 candidates)
+ *   2. Browser trickles candidates as they arrive
+ *   3. Agent receives offer, creates answer with all candidates, sends back
+ *   4. ICE checking starts in parallel with browser's gathering
  */
 import { encode, decode } from '@msgpack/msgpack'
 
@@ -20,56 +23,49 @@ export interface IceConfig {
   }>
 }
 
-/**
- * Connect via WebRTC. Agent sends offer, browser sends answer.
- * Full vanilla ICE: both sides wait for gathering complete before sending SDP.
- */
 export async function connectWebRtc(
   iceConfig: IceConfig,
   sendSignal: (payload: Record<string, unknown>) => void,
   onSignal: (handler: (payload: Record<string, unknown>) => void) => void,
 ): Promise<WebRtcConnection> {
   return new Promise((resolve, reject) => {
-    const servers = [
-      { urls: ['stun:stun.l.google.com:19302'] },
-      ...iceConfig.iceServers,
-    ]
-    console.log('[oxmux-webrtc] creating PC, ICE servers:', servers.length)
-    const pc = new RTCPeerConnection({ iceServers: servers })
+    console.log('[oxmux-webrtc] creating PC (browser=offerer, trickle ICE), ICE servers:', iceConfig.iceServers.length)
+    const pc = new RTCPeerConnection({
+      iceServers: iceConfig.iceServers,
+      iceTransportPolicy: 'all',
+    })
 
     let messageHandler: ((msg: Record<string, unknown>) => void) | null = null
     let closeHandler: (() => void) | null = null
     let dataChannel: RTCDataChannel | null = null
+    let candidateCount = 0
 
-    // Browser receives DataChannel from agent
-    pc.ondatachannel = (ev) => {
-      const dc = ev.channel
-      dc.binaryType = 'arraybuffer'
-      console.log('[oxmux-webrtc] DataChannel received:', dc.label)
+    // Browser creates the DataChannel (browser is offerer)
+    const dc = pc.createDataChannel('oxmux')
+    dc.binaryType = 'arraybuffer'
 
-      dc.onopen = () => {
-        console.log('[oxmux-webrtc] DataChannel opened')
-        dataChannel = dc
-        resolve({
-          send: (msg) => { if (dc.readyState === 'open') dc.send(encode(msg)) },
-          close: () => { dc.close(); pc.close() },
-          onMessage: (h) => { messageHandler = h },
-          onClose: (h) => { closeHandler = h },
-        })
+    dc.onopen = () => {
+      console.log('[oxmux-webrtc] DataChannel opened')
+      dataChannel = dc
+      resolve({
+        send: (msg) => { if (dc.readyState === 'open') dc.send(encode(msg)) },
+        close: () => { dc.close(); pc.close() },
+        onMessage: (h) => { messageHandler = h },
+        onClose: (h) => { closeHandler = h },
+      })
+    }
+
+    dc.onmessage = (ev: MessageEvent) => {
+      try {
+        messageHandler?.(decode(new Uint8Array(ev.data)) as Record<string, unknown>)
+      } catch (e) {
+        console.warn('[oxmux-webrtc] decode error:', e)
       }
+    }
 
-      dc.onmessage = (ev: MessageEvent) => {
-        try {
-          messageHandler?.(decode(new Uint8Array(ev.data)) as Record<string, unknown>)
-        } catch (e) {
-          console.warn('[oxmux-webrtc] decode error:', e)
-        }
-      }
-
-      dc.onclose = () => {
-        console.log('[oxmux-webrtc] DataChannel closed')
-        closeHandler?.()
-      }
+    dc.onclose = () => {
+      console.log('[oxmux-webrtc] DataChannel closed')
+      closeHandler?.()
     }
 
     pc.oniceconnectionstatechange = () => {
@@ -83,56 +79,60 @@ export async function connectWebRtc(
       }
     }
 
-    // Helper: wait for ICE gathering complete
-    const waitForGathering = (): Promise<void> => new Promise((res) => {
-      if (pc.iceGatheringState === 'complete') return res()
-      const check = () => { if (pc.iceGatheringState === 'complete') res() }
-      pc.addEventListener('icegatheringstatechange', check)
-      setTimeout(res, 15000) // 15s max wait
-    })
-
-    // Handle agent's offer → create answer with all candidates
-    onSignal(async (payload) => {
-      try {
-        if (payload.type === 'offer') {
-          console.log('[oxmux-webrtc] received offer, creating answer...')
-
-          await pc.setRemoteDescription(new RTCSessionDescription({
-            type: 'offer',
-            sdp: payload.sdp as string,
-          }))
-
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-
-          // Wait for ICE gathering complete (vanilla ICE)
-          console.log('[oxmux-webrtc] waiting for ICE gathering...')
-          await waitForGathering()
-
-          const sdp = pc.localDescription?.sdp || ''
-          const candidates = (sdp.match(/a=candidate/g) || []).length
-          console.log('[oxmux-webrtc] sending answer with', candidates, 'candidates')
-
-          // Send answer with all candidates embedded in SDP
-          sendSignal({ type: 'answer', sdp })
-        }
-      } catch (e) {
-        console.error('[oxmux-webrtc] error:', e)
+    // Trickle ICE: send each candidate to agent as it arrives
+    pc.addEventListener('icecandidate', (ev) => {
+      if (ev.candidate) {
+        candidateCount++
+        console.log('[oxmux-webrtc] trickle #' + candidateCount + ':',
+          ev.candidate.type, ev.candidate.protocol, ev.candidate.address || '(mDNS)')
+        sendSignal({ type: 'ice', candidate: ev.candidate.toJSON() })
+      } else {
+        console.log('[oxmux-webrtc] gathering done:', candidateCount, 'candidates')
       }
     })
 
-    // Tell agent we're ready
-    console.log('[oxmux-webrtc] sending ready')
-    sendSignal({ type: 'ready' })
+    // Handle answer from agent
+    onSignal(async (payload) => {
+      try {
+        if (payload.type === 'answer') {
+          const answerSdp = payload.sdp as string
+          console.log('[oxmux-webrtc] received answer with',
+            (answerSdp.match(/a=candidate/g) || []).length, 'candidates')
+          await pc.setRemoteDescription(new RTCSessionDescription({
+            type: 'answer', sdp: answerSdp,
+          }))
+          console.log('[oxmux-webrtc] remote description set — ICE checking')
+        }
+      } catch (e) {
+        console.error('[oxmux-webrtc] error setting answer:', e)
+      }
+    })
 
-    // Timeout
+    // Create and send offer IMMEDIATELY (trickle ICE — don't wait for gathering)
+    ;(async () => {
+      try {
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        // Send offer right away with 0 candidates — candidates trickle separately
+        const sdp = pc.localDescription?.sdp || ''
+        console.log('[oxmux-webrtc] sending offer (trickle ICE, candidates follow)')
+        sendSignal({ type: 'offer', sdp })
+      } catch (e) {
+        console.error('[oxmux-webrtc] error creating offer:', e)
+        reject(e)
+      }
+    })()
+
+    // Outer timeout
     setTimeout(() => {
       if (!dataChannel) {
-        console.log('[oxmux-webrtc] timeout — ICE:', pc.iceConnectionState, 'conn:', pc.connectionState)
+        console.log('[oxmux-webrtc] timeout — ICE:', pc.iceConnectionState,
+          'conn:', pc.connectionState, 'candidates:', candidateCount)
         reject(new Error('WebRTC connection timeout'))
         pc.close()
       }
-    }, 60000)
+    }, 30000)
   })
 }
 

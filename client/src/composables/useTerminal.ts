@@ -30,6 +30,8 @@ export function useTerminal(
   const fitAddon = new FitAddon()
   const searchAddon = new SearchAddon()
   let resizeObserver: ResizeObserver | null = null
+  let pasteHandler: ((e: ClipboardEvent) => void) | null = null
+  let contextMenuHandler: ((e: MouseEvent) => void) | null = null
 
   function mount() {
     if (!containerRef.value || !paneId.value) {
@@ -58,8 +60,37 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Skip WebGL addon — use default canvas renderer for reliability
-    // WebGL can fail silently in headless browsers, VMs, and some GPUs
+    // Let browser handle Ctrl+V/Cmd+V natively (triggers paste event)
+    t.attachCustomKeyEventHandler((ev) => {
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'v') {
+        return false // let browser handle paste
+      }
+      return true
+    })
+
+    // Handle paste event on the terminal container
+    pasteHandler = (e: ClipboardEvent) => {
+      e.preventDefault()
+      const text = e.clipboardData?.getData('text/plain')
+      if (text && paneId.value) {
+        store.sendInput(paneId.value, new TextEncoder().encode(text))
+      }
+    }
+    containerRef.value.addEventListener('paste', pasteHandler)
+
+    // Right-click paste
+    contextMenuHandler = async (e: MouseEvent) => {
+      e.preventDefault()
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text && paneId.value) {
+          store.sendInput(paneId.value, new TextEncoder().encode(text))
+        }
+      } catch {
+        // Clipboard API not available or permission denied — ignore
+      }
+    }
+    containerRef.value.addEventListener('contextmenu', contextMenuHandler)
 
     // Delay fit to ensure container has layout dimensions
     requestAnimationFrame(() => {
@@ -69,12 +100,12 @@ export function useTerminal(
 
     term.value = t
 
-    // Input → server
+    // Input → server (includes arrow keys as escape sequences)
     t.onData((data: string) => {
       store.sendInput(paneId.value, new TextEncoder().encode(data))
     })
 
-    // Binary input (paste etc.)
+    // Binary input
     t.onBinary((data: string) => {
       const bytes = Uint8Array.from(data, c => c.charCodeAt(0))
       store.sendInput(paneId.value, bytes)
@@ -116,6 +147,10 @@ export function useTerminal(
 
   function dispose() {
     resizeObserver?.disconnect()
+    if (containerRef.value) {
+      if (pasteHandler) containerRef.value.removeEventListener('paste', pasteHandler)
+      if (contextMenuHandler) containerRef.value.removeEventListener('contextmenu', contextMenuHandler as EventListener)
+    }
     store.unsubscribePane(paneId.value)
     term.value?.dispose()
     term.value = null

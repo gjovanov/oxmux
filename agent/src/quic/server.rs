@@ -117,6 +117,9 @@ async fn handle_session(
     let webrtc_dc: Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // Channel for DataChannel messages → main event loop (so all msg types are handled)
+    let (dc_msg_tx, mut dc_msg_rx) = mpsc::channel::<Vec<u8>>(256);
+
     let ctrl_handle = tokio::spawn(async move {
         if let Err(e) = run_control_mode(&ctrl_session_name, output_tx).await {
             warn!(error = %e, "control mode ended");
@@ -152,7 +155,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &webrtc_dc).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -195,7 +198,16 @@ async fn handle_session(
                 }
             }
 
-            // Read from client
+            // Handle messages from WebRTC DataChannel (forwarded via channel)
+            dc_data = dc_msg_rx.recv() => {
+                if let Some(data) = dc_data {
+                    if let Err(e) = handle_message(&data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc).await {
+                        warn!("DC message error: {}", e);
+                    }
+                }
+            }
+
+            // Read from client (QUIC stream)
             result = recv.read(&mut read_buf) => {
                 match result {
                     Ok(Some(n)) if n > 0 => {
@@ -209,6 +221,12 @@ async fn handle_session(
     }
 
     ctrl_handle.abort();
+
+    // Close WebRTC peer connection if active (prevent resource leak)
+    if let Some(pc) = webrtc_pc.lock().await.take() {
+        let _ = pc.close().await;
+    }
+
     Ok(())
 }
 
@@ -313,6 +331,7 @@ async fn handle_message(
     webrtc_pc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::peer_connection::RTCPeerConnection>>>>,
     webrtc_remote_set: &Arc<std::sync::atomic::AtomicBool>,
     webrtc_pending_candidates: &Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>>,
+    dc_msg_tx: &mpsc::Sender<Vec<u8>>,
     webrtc_dc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
@@ -322,19 +341,42 @@ async fn handle_message(
         "sub" => {
             let pane = get_str(&msg, "pane");
             info!(pane = %pane, "client subscribed to pane");
+
+            // Send current pane content so terminal isn't blank after transport switch
+            if is_valid_pane_id(pane) {
+                let socket = find_tmux_socket();
+                let mut cmd = std::process::Command::new("tmux");
+                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+                cmd.args(["capture-pane", "-t", pane, "-p", "-e"]);
+                if let Ok(output) = cmd.output() {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        let capture = output.stdout;
+                        let reply = serde_json::json!({
+                            "t": "o",
+                            "pane": pane,
+                            "data": capture,
+                        });
+                        if let Ok(encoded) = rmp_serde::to_vec_named(&reply) {
+                            // Try DC first, fall back to QUIC
+                            let sent_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
+                                if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                                    dc.send(&Bytes::from(encoded.clone())).await.is_ok()
+                                } else { false }
+                            } else { false };
+
+                            if !sent_dc {
+                                let _ = send_msg(send, &reply).await;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         "i" => {
             let pane = get_str(&msg, "pane");
             let bytes = get_bytes(&msg, "data");
-            if !bytes.is_empty() && !pane.is_empty() {
-                let hex: String = bytes.iter().map(|b| format!("{:02x} ", b)).collect();
-                let socket = find_tmux_socket();
-                let mut cmd = std::process::Command::new("tmux");
-                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["send-keys", "-t", pane, "-H", hex.trim()]);
-                let _ = cmd.output();
-            }
+            send_tmux_input(pane, &bytes);
         }
 
         "r" => {
@@ -355,26 +397,38 @@ async fn handle_message(
             send_msg(send, &serde_json::json!({"t": "sess_list", "sessions": []})).await?;
         }
 
-        "webrtc_ready" | "webrtc_offer" => {
-            // parakeet-rs pattern: AGENT creates the offer, browser answers
-            info!("Browser ready for WebRTC, agent creating offer");
+        "webrtc_offer" => {
+            // Browser-as-offerer pattern (like parakeet-rs):
+            // Browser sends offer with DataChannel + ICE candidates,
+            // agent creates answer with its own candidates.
+            let offer_sdp = get_str(&msg, "sdp").to_string();
+            let offer_candidates = offer_sdp.matches("a=candidate").count();
+            info!(candidates = offer_candidates, "Received WebRTC offer from browser");
 
-            let tmux_clone = tmux_mgr.pane_outputs.clone();
+            // Clean up previous PC if retrying
+            if let Some(old_pc) = webrtc_pc.lock().await.take() {
+                info!("Closing previous WebRTC PC for retry");
+                let _ = old_pc.close().await;
+            }
+            *webrtc_dc.lock().await = None;
+            webrtc_remote_set.store(false, std::sync::atomic::Ordering::SeqCst);
+            webrtc_pending_candidates.lock().await.clear();
+
             let dc_store = webrtc_dc.clone();
-            match create_webrtc_offer(tmux_clone, dc_store).await {
-                Ok((pc, offer_sdp, candidate_count)) => {
+            let dc_tx = dc_msg_tx.clone();
+            match create_webrtc_answer(&offer_sdp, dc_store, dc_tx).await {
+                Ok((pc, answer_sdp, candidate_count)) => {
                     *webrtc_pc.lock().await = Some(pc);
 
-                    // Vanilla ICE: all candidates already in the SDP, no separate messages
                     send_msg(send, &serde_json::json!({
-                        "t": "webrtc_offer",
-                        "sdp": offer_sdp,
+                        "t": "webrtc_answer",
+                        "sdp": answer_sdp,
                     })).await?;
 
-                    info!(candidates = candidate_count, "WebRTC offer sent (vanilla ICE)");
+                    info!(candidates = candidate_count, "WebRTC answer sent (vanilla ICE)");
                 }
                 Err(e) => {
-                    warn!(error = %e, "WebRTC offer creation failed");
+                    warn!(error = %e, "WebRTC answer creation failed");
                     send_msg(send, &serde_json::json!({
                         "t": "webrtc_error",
                         "error": e.to_string(),
@@ -383,19 +437,10 @@ async fn handle_message(
             }
         }
 
-        "webrtc_answer" => {
-            // Vanilla ICE: browser's answer SDP contains all candidates
-            let sdp = get_str(&msg, "sdp").to_string();
-            let candidates = sdp.matches("a=candidate").count();
-            info!(candidates, "Received WebRTC answer from browser (vanilla ICE)");
-            if let Some(pc) = webrtc_pc.lock().await.as_ref() {
-                use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-                if let Err(e) = pc.set_remote_description(RTCSessionDescription::answer(sdp)?).await {
-                    warn!(error = %e, "Failed to set remote description");
-                } else {
-                    info!("WebRTC remote description set — ICE should start checking");
-                }
-            }
+        "webrtc_ready" => {
+            // Legacy: browser signals readiness. With browser-as-offerer, this is a no-op.
+            // The browser will send the offer directly.
+            info!("Browser sent webrtc_ready (browser-as-offerer mode — waiting for offer)");
         }
 
         "webrtc_ice" => {
@@ -456,33 +501,53 @@ async fn handle_message(
 
 // ── WebRTC P2P ──────────────────────────────────────────────────────────
 
-/// Create a WebRTC peer connection with DataChannel for terminal I/O.
-/// Agent creates the offer with all ICE candidates embedded (vanilla ICE).
-async fn create_webrtc_offer(
-    pane_outputs: Arc<dashmap::DashMap<String, tokio::sync::broadcast::Sender<Bytes>>>,
+/// Create a WebRTC peer connection as answerer.
+/// Browser sends the offer (with DataChannel + candidates),
+/// agent creates answer with its own candidates (vanilla ICE).
+async fn create_webrtc_answer(
+    offer_sdp: &str,
     dc_store: Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+    dc_msg_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<(Arc<webrtc::peer_connection::RTCPeerConnection>, String, usize)> {
     use webrtc::api::interceptor_registry::register_default_interceptors;
     use webrtc::api::media_engine::MediaEngine;
     use webrtc::api::APIBuilder;
     use webrtc::data_channel::data_channel_message::DataChannelMessage;
-    use webrtc::data_channel::RTCDataChannel;
     use webrtc::ice_transport::ice_server::RTCIceServer;
     use webrtc::interceptor::registry::Registry;
     use webrtc::peer_connection::configuration::RTCConfiguration;
     use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
+    use webrtc::api::setting_engine::SettingEngine;
+    use webrtc::ice::network_type::NetworkType;
+    use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut m)?;
 
+    let mut setting_engine = SettingEngine::default();
+
+    if let Ok(public_ip) = std::env::var("PUBLIC_IP") {
+        info!(ip = %public_ip, "setting NAT 1:1 IP mapping (srflx)");
+        setting_engine.set_nat_1to1_ips(vec![public_ip], RTCIceCandidateType::Srflx);
+    }
+
+    setting_engine.set_network_types(vec![
+        NetworkType::Udp4,
+        NetworkType::Udp6,
+        NetworkType::Tcp4,
+        NetworkType::Tcp6,
+    ]);
+
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
+        .with_setting_engine(setting_engine)
         .build();
 
-    // Generate TURN credentials using COTURN shared secret (HMAC-SHA1)
+    // TURN credentials for agent's own STUN/TURN gathering
     let coturn_secret = std::env::var("COTURN_AUTH_SECRET").unwrap_or_default();
     let mut ice_servers = vec![
         RTCIceServer {
@@ -519,9 +584,8 @@ async fn create_webrtc_offer(
 
         ice_servers.push(RTCIceServer {
             urls: turn_urls,
-            username: username.clone(),
-            credential: credential.clone(),
-            // credential_type defaults to Password in v0.17+
+            username,
+            credential,
         });
     }
 
@@ -540,70 +604,52 @@ async fn create_webrtc_offer(
         let done = ice_done_clone.clone();
         Box::pin(async move {
             if candidate.is_none() {
-                done.notify_one(); // gathering complete
+                done.notify_one();
             }
         })
     }));
 
-    // Handle DataChannel from browser
+    // Handle DataChannel from browser (browser is offerer, creates DC)
     let dc_store_clone = dc_store.clone();
-    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-        let pane_outputs = pane_outputs.clone();
-        let dc_store = dc_store_clone.clone();
+    pc.on_data_channel(Box::new(move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
+        let store = dc_store_clone.clone();
+        let tx = dc_msg_tx.clone();
         Box::pin(async move {
-            info!(label = %dc.label(), "WebRTC DataChannel opened");
-            // Store DC for output streaming
-            *dc_store.lock().await = Some(dc.clone());
+            info!(label = %dc.label(), "DataChannel received from browser");
 
+            // Store DC when it opens
+            let store_for_open = store.clone();
+            let dc_for_open = dc.clone();
+            dc.on_open(Box::new(move || {
+                let s = store_for_open.clone();
+                let d = dc_for_open.clone();
+                Box::pin(async move {
+                    info!("WebRTC DataChannel opened (agent side)");
+                    *s.lock().await = Some(d);
+                })
+            }));
+
+            // Forward messages to main event loop
             dc.on_message(Box::new(move |msg: DataChannelMessage| {
                 let data = msg.data.to_vec();
+                let tx = tx.clone();
                 Box::pin(async move {
-                    // Decode msgpack and handle (input, subscribe, etc.)
-                    match rmpv::decode::read_value(&mut &data[..]) {
-                        Ok(val) => {
-                            let t = val.as_map()
-                                .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("t")))
-                                .and_then(|(_, v)| v.as_str())
-                                .unwrap_or("");
-
-                            if t == "i" {
-                                let pane = val.as_map()
-                                    .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("pane")))
-                                    .and_then(|(_, v)| v.as_str())
-                                    .unwrap_or("");
-                                let input = val.as_map()
-                                    .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("data")))
-                                    .map(|(_, v)| match v {
-                                        rmpv::Value::Binary(b) => b.clone(),
-                                        rmpv::Value::String(s) => s.as_bytes().to_vec(),
-                                        _ => vec![],
-                                    })
-                                    .unwrap_or_default();
-
-                                if !input.is_empty() {
-                                    let hex: String = input.iter().map(|b| format!("{:02x} ", b)).collect();
-                                    let _ = std::process::Command::new("tmux")
-                                        .args(["send-keys", "-t", pane, "-H", hex.trim()])
-                                        .output();
-                                }
-                            }
-                        }
-                        Err(e) => debug!("DataChannel decode error: {}", e),
+                    if tx.send(data).await.is_err() {
+                        debug!("DC message channel closed");
                     }
                 })
             }));
         })
     }));
 
-    // Agent creates DataChannel (agent is offerer, like parakeet-rs)
-    let _dc = pc.create_data_channel("oxmux", None).await?;
+    // Set browser's offer as remote description
+    pc.set_remote_description(RTCSessionDescription::offer(offer_sdp.to_string())?).await?;
 
-    // Create offer
-    let offer = pc.create_offer(None).await?;
-    let offer_sdp = offer.sdp.clone();
-    pc.set_local_description(offer).await?;
+    // Create answer
+    let answer = pc.create_answer(None).await?;
+    pc.set_local_description(answer).await?;
 
-    // Wait for ICE gathering to complete (vanilla ICE)
+    // Wait for ICE gathering to complete (vanilla ICE on agent side)
     tokio::select! {
         _ = ice_done.notified() => {}
         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
@@ -611,17 +657,32 @@ async fn create_webrtc_offer(
         }
     }
 
-    // Get the offer SDP with all candidates embedded
     let local_desc = pc.local_description().await
         .ok_or_else(|| anyhow::anyhow!("no local description after gathering"))?;
     let final_sdp = local_desc.sdp;
     let candidate_count = final_sdp.matches("a=candidate").count();
 
-    info!(candidates = candidate_count, "WebRTC offer created (vanilla ICE)");
+    info!(candidates = candidate_count, "WebRTC answer created (vanilla ICE)");
     Ok((pc, final_sdp, candidate_count))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Validate tmux pane ID format (%N where N is a number).
+fn is_valid_pane_id(pane: &str) -> bool {
+    pane.starts_with('%') && pane.len() > 1 && pane[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Send input to a tmux pane via send-keys -H.
+fn send_tmux_input(pane: &str, data: &[u8]) {
+    if data.is_empty() || !is_valid_pane_id(pane) { return; }
+    let hex: String = data.iter().map(|b| format!("{:02x} ", b)).collect();
+    let socket = find_tmux_socket();
+    let mut cmd = std::process::Command::new("tmux");
+    if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+    cmd.args(["send-keys", "-t", pane, "-H", hex.trim()]);
+    let _ = cmd.output();
+}
 
 fn get_str<'a>(v: &'a rmpv::Value, key: &str) -> &'a str {
     v.as_map()

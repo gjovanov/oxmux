@@ -142,6 +142,7 @@ Environment=AGENT_QUIC_PORT={quic_port}
 Environment=OXMUX_AGENT_SECRET={agent_secret}
 Environment=COTURN_AUTH_SECRET={coturn_secret}
 Environment=COTURN_SERVERS={coturn_servers}
+Environment=PUBLIC_IP={host}
 Environment=RUST_LOG=oxmux_agent=info
 ExecStart={agent_bin}
 Restart=always

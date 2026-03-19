@@ -80,7 +80,7 @@
               <button
                 v-if="store.activeTransportMode !== 'ssh'"
                 class="action-btn disconnect"
-                @click="store.activeTransportMode = 'ssh'"
+                @click="store.teardownP2P()"
               >Back to SSH</button>
             </div>
           </template>
@@ -98,9 +98,9 @@
         </div>
 
         <!-- tmux tree for connected session -->
-        <template v-if="ms.status === 'connected' && store.activeSessionId === ms.id">
+        <template v-if="ms.status === 'connected'">
           <div
-            v-for="session in store.sessions"
+            v-for="session in (store.activeSessionId === ms.id ? store.sessions : ms.tmux_sessions || [])"
             :key="session.id"
             class="session-node"
           >
@@ -124,8 +124,8 @@
                 v-for="pane in window.panes"
                 :key="pane.id"
                 class="pane-node"
-                :class="{ active: pane.isActive, claude: pane.isClaude, selected: store.activePane === pane.id }"
-                @click="selectPane(pane.id)"
+                :class="{ active: pane.isActive, claude: pane.isClaude, selected: store.activeSessionId === ms.id && store.activePane === pane.id }"
+                @click="switchToSession(ms.id, pane.id)"
               >
                 <span class="pane-icon">{{ pane.isClaude ? '&#x1F916;' : '&#x25B8;' }}</span>
                 <span class="pane-cmd">{{ pane.currentCommand }}</span>
@@ -170,7 +170,11 @@ const statusLabel = computed(() => ({
   disconnected: 'Disconnected',
 }[store.connectionStatus]))
 
-function selectPane(paneId: string) {
+function switchToSession(sessionId: string, paneId: string) {
+  if (store.activeSessionId !== sessionId) {
+    // Switching to a different session — reconnect it (cleans up old session)
+    store.connectSession(sessionId)
+  }
   store.activePane = paneId
 }
 

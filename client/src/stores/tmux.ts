@@ -104,6 +104,19 @@ export interface ManagedSession {
 
 type PaneOutputHandler = (data: Uint8Array) => void
 
+// Message types that go to the server (control plane)
+const CONTROL_MSG_TYPES = new Set([
+  'sess_create', 'sess_list', 'sess_connect', 'sess_disconnect',
+  'sess_delete', 'sess_refresh', 'sess_update',
+  'agent_status', 'agent_install', 'transport_upgrade',
+  'ice_req',
+])
+
+// Message types that go to the agent (data plane)
+const DATA_MSG_TYPES = new Set([
+  'sub', 'unsub', 'i', 'r', 'ping',
+])
+
 export const useTmuxStore = defineStore('tmux', () => {
   // State
   const sessions = ref<TmuxSessionInfo[]>([])
@@ -125,6 +138,14 @@ export const useTmuxStore = defineStore('tmux', () => {
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   let backoffMs = 1000
 
+  // ── Dual-transport architecture ─────────────────────────────────────
+  // WS = control plane (always alive): session CRUD, agent management
+  // P2P = data plane (optional): pane I/O, subscribe, resize
+  let wsSend: ((msg: Record<string, unknown>) => void) | null = null
+  let p2pSend: ((msg: Record<string, unknown>) => void) | null = null
+  let p2pClose: (() => void) | null = null
+  let wsUrl: string | null = null
+
   // Computed
   const allPanes = computed(() =>
     sessions.value.flatMap(s => s.windows.flatMap(w => w.panes))
@@ -139,33 +160,31 @@ export const useTmuxStore = defineStore('tmux', () => {
       .reduce((sum, s) => sum + s.totalCostUsd, 0)
   )
 
-  // Abstract transport — send function set by connect()
-  let transportSend: ((msg: Record<string, unknown>) => void) | null = null
-  let transportClose: (() => void) | null = null
-
   // Actions
-  function connect(wsUrl: string) {
+  function connect(url: string) {
     if (ws.value?.readyState === WebSocket.OPEN) return
 
+    wsUrl = url
     connectionStatus.value = 'connecting'
-    const socket = new WebSocket(wsUrl)
+    const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'
 
     socket.onopen = () => {
       connectionStatus.value = 'connected'
       backoffMs = 1000
-      transportSend = (msg) => {
+      wsSend = (msg) => {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(encode(msg))
         }
       }
-      transportClose = () => socket.close()
       sendMsg({ t: 'sess_list' })
     }
 
     socket.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
       try {
         const msg = decode(new Uint8Array(ev.data)) as Record<string, unknown>
+        // When P2P is active, skip pane output from WS (agent sends it via P2P)
+        if (p2pSend && msg.t === 'o') return
         handleServerMsg(msg)
       } catch (e) {
         console.error('Failed to decode server message', e)
@@ -174,8 +193,8 @@ export const useTmuxStore = defineStore('tmux', () => {
 
     socket.onclose = () => {
       connectionStatus.value = 'reconnecting'
-      transportSend = null
-      scheduleReconnect(wsUrl)
+      wsSend = null
+      scheduleReconnect(url)
     }
 
     socket.onerror = () => {
@@ -195,13 +214,13 @@ export const useTmuxStore = defineStore('tmux', () => {
 
       connectionStatus.value = 'connected'
       backoffMs = 1000
-      transportSend = (msg) => conn.send(msg)
-      transportClose = () => conn.close()
+      // QUIC replaces WS entirely (no dual-transport for direct QUIC to server)
+      wsSend = (msg) => conn.send(msg)
 
       conn.onMessage((msg) => handleServerMsg(msg))
       conn.onClose(() => {
         connectionStatus.value = 'disconnected'
-        transportSend = null
+        wsSend = null
       })
 
       sendMsg({ t: 'sess_list' })
@@ -219,7 +238,6 @@ export const useTmuxStore = defineStore('tmux', () => {
     const { connectWebRtc } = await import('@/composables/useWebRtc')
     const { connectQuic: doQuic } = await import('@/composables/useQuic')
 
-    connectionStatus.value = 'connecting'
     try {
       // First establish a QUIC connection for signaling
       const quicUrl = `https://${agentHost}:${agentPort}`
@@ -233,24 +251,22 @@ export const useTmuxStore = defineStore('tmux', () => {
       // Keep QUIC alive during WebRTC negotiation
       const keepAlive = setInterval(() => quicConn.send({ t: 'ping', ts: Date.now() }), 5000)
 
-      // Set up signaling handlers via QUIC
+      // Set up signaling: browser sends offer, agent sends answer
       const signalResolvers = new Map<string, (payload: Record<string, unknown>) => void>()
 
       quicConn.onMessage((msg) => {
-        if (msg.t === 'webrtc_offer' || msg.t === 'webrtc_error') {
+        if (msg.t === 'webrtc_answer' || msg.t === 'webrtc_error') {
           console.log('[oxmux] WebRTC signaling:', msg.t)
           const handler = signalResolvers.get('signal')
-          if (handler) {
-            if (msg.t === 'webrtc_offer') {
-              handler({ type: 'offer', sdp: msg.sdp })
-            }
+          if (handler && msg.t === 'webrtc_answer') {
+            handler({ type: 'answer', sdp: msg.sdp })
           }
-        } else {
+        } else if (msg.t !== 'o') {
           handleServerMsg(msg)
         }
       })
 
-      // Request ICE config from server (snake_case → camelCase)
+      // Request ICE config from server
       const iceRes = await fetch(`/api/ice-config?user=webrtc`)
       const raw = await iceRes.json()
       const iceConfig = {
@@ -264,14 +280,14 @@ export const useTmuxStore = defineStore('tmux', () => {
       // Wait for agent to set up control mode before starting WebRTC
       await new Promise(r => setTimeout(r, 1000))
 
+      // Browser-as-offerer with trickle ICE: offer + candidates sent separately
       const conn = await connectWebRtc(
         iceConfig,
         (payload) => {
-          // Vanilla ICE: only offer/answer, no separate ICE messages
-          if (payload.type === 'ready') {
-            quicConn.send({ t: 'webrtc_ready' })
-          } else if (payload.type === 'answer') {
-            quicConn.send({ t: 'webrtc_answer', sdp: payload.sdp })
+          if (payload.type === 'offer') {
+            quicConn.send({ t: 'webrtc_offer', sdp: payload.sdp })
+          } else if (payload.type === 'ice') {
+            quicConn.send({ t: 'webrtc_ice', candidate: payload.candidate })
           }
         },
         (handler) => {
@@ -279,44 +295,88 @@ export const useTmuxStore = defineStore('tmux', () => {
         },
       )
 
-      connectionStatus.value = 'connected'
-      backoffMs = 1000
-      transportSend = (msg) => conn.send(msg)
-      transportClose = () => { clearInterval(keepAlive); conn.close(); quicConn.close() }
+      // Set P2P as data plane
+      p2pSend = (msg) => conn.send(msg)
+      p2pClose = () => { clearInterval(keepAlive); conn.close(); quicConn.close() }
       activeTransportMode.value = 'webrtc_p2p'
 
       conn.onMessage((msg) => handleServerMsg(msg))
       conn.onClose(() => {
         console.warn('[oxmux] WebRTC P2P connection lost')
-        activeTransportMode.value = 'ssh'
+        teardownP2P()
       })
 
       console.log('[oxmux] WebRTC P2P connected!')
 
-      // Re-subscribe panes
+      // Re-subscribe panes via P2P
       for (const paneId of paneHandlers.keys()) {
-        sendMsg({ t: 'sub', pane: paneId })
+        p2pSend({ t: 'sub', pane: paneId })
       }
     } catch (e) {
-      console.error('[oxmux] WebRTC P2P failed:', e)
-      activeTransportMode.value = 'ssh'
+      console.warn('[oxmux] WebRTC P2P failed, falling back to QUIC P2P:', e)
+      teardownP2P()
+
+      // Auto-fallback to QUIC P2P
+      try {
+        await connectQuicP2P(agentHost, agentPort, token)
+        console.log('[oxmux] QUIC P2P fallback succeeded')
+      } catch (quicErr) {
+        console.error('[oxmux] QUIC P2P fallback also failed:', quicErr)
+        teardownP2P()
+      }
     }
   }
 
-  function scheduleReconnect(wsUrl: string) {
+  /** Tear down P2P data plane and revert to WS-only. */
+  function teardownP2P() {
+    if (p2pClose) {
+      try { p2pClose() } catch { /* ignore */ }
+    }
+    p2pSend = null
+    p2pClose = null
+    activeTransportMode.value = 'ssh'
+  }
+
+  function scheduleReconnect(url: string) {
     if (reconnectTimeout) clearTimeout(reconnectTimeout)
     reconnectTimeout = setTimeout(() => {
       backoffMs = Math.min(backoffMs * 2, 30_000)
-      connect(wsUrl)
+      connect(url)
     }, backoffMs)
   }
 
+  /** Route messages to the correct transport based on type. */
   function sendMsg(msg: Record<string, unknown>) {
-    if (!transportSend) {
-      console.warn('[oxmux] sendMsg: not connected, dropping:', msg.t)
+    const t = msg.t as string
+
+    // Data messages → P2P if available, else WS
+    if (DATA_MSG_TYPES.has(t)) {
+      const sender = p2pSend || wsSend
+      if (!sender) {
+        console.warn('[oxmux] sendMsg: not connected, dropping:', t)
+        return
+      }
+      sender(msg)
       return
     }
-    transportSend(msg)
+
+    // Control messages → always WS
+    if (CONTROL_MSG_TYPES.has(t)) {
+      if (!wsSend) {
+        console.warn('[oxmux] sendMsg: WS not connected, dropping control msg:', t)
+        return
+      }
+      wsSend(msg)
+      return
+    }
+
+    // Unknown type → try best available
+    const sender = wsSend || p2pSend
+    if (!sender) {
+      console.warn('[oxmux] sendMsg: not connected, dropping:', t)
+      return
+    }
+    sender(msg)
   }
 
   function handleServerMsg(msg: Record<string, unknown>) {
@@ -378,14 +438,12 @@ export const useTmuxStore = defineStore('tmux', () => {
         const id = msg.session_id as string
         managedSessions.value = managedSessions.value.filter(s => s.id !== id)
         if (activeSessionId.value === id) {
-          activeSessionId.value = null
-          sessions.value = []
+          cleanupSession()
         }
         break
       }
       case 'sess_connected': {
         const session = msg.session as ManagedSession
-        // Only update managed sessions if this is a known session (not from P2P agent)
         const idx = managedSessions.value.findIndex(s => s.id === session.id)
         if (idx >= 0) {
           managedSessions.value[idx] = session
@@ -399,7 +457,6 @@ export const useTmuxStore = defineStore('tmux', () => {
             checkAgentStatus(host)
           }
         }
-        // If from P2P agent (unknown ID), don't overwrite state
         break
       }
       case 'sess_disconnected': {
@@ -407,8 +464,7 @@ export const useTmuxStore = defineStore('tmux', () => {
         const idx = managedSessions.value.findIndex(s => s.id === session.id)
         if (idx >= 0) managedSessions.value[idx] = session
         if (activeSessionId.value === session.id) {
-          sessions.value = []
-          activePane.value = null
+          cleanupSession()
         }
         break
       }
@@ -429,7 +485,6 @@ export const useTmuxStore = defineStore('tmux', () => {
         break
       }
       case 'transport_upgrade_ready': {
-        const sid = msg.session_id as string
         const token = msg.agent_token as string
         const host = msg.agent_host as string
         const port = msg.agent_port as number
@@ -468,23 +523,56 @@ export const useTmuxStore = defineStore('tmux', () => {
   }
 
   function connectSession(sessionId: string) {
+    // Clean up previous session's state before connecting new one
+    if (activeSessionId.value && activeSessionId.value !== sessionId) {
+      cleanupSession()
+    }
     sendMsg({ t: 'sess_connect', session_id: sessionId })
   }
 
   function disconnectSession(sessionId: string) {
-    sendMsg({ t: 'sess_disconnect', session_id: sessionId })
+    // Always send via WS (control plane)
+    if (wsSend) {
+      wsSend({ t: 'sess_disconnect', session_id: sessionId })
+    }
+    if (activeSessionId.value === sessionId) {
+      cleanupSession()
+    }
   }
 
   function deleteSession(sessionId: string) {
+    if (activeSessionId.value === sessionId) {
+      cleanupSession()
+    }
     sendMsg({ t: 'sess_delete', session_id: sessionId })
   }
 
   function refreshSession(sessionId: string) {
-    sendMsg({ t: 'sess_refresh', session_id: sessionId })
+    // Always send via WS (control plane)
+    if (wsSend) {
+      wsSend({ t: 'sess_refresh', session_id: sessionId })
+    }
   }
 
   function listSessions() {
     sendMsg({ t: 'sess_list' })
+  }
+
+  /** Clean up current session: tear down P2P first, then unsubscribe panes via WS, reset state. */
+  function cleanupSession() {
+    // Tear down P2P first so unsub messages go to WS
+    teardownP2P()
+
+    // Unsubscribe all pane handlers (now routed to WS)
+    for (const paneId of paneHandlers.keys()) {
+      sendMsg({ t: 'unsub', pane: paneId })
+    }
+    paneHandlers.clear()
+
+    // Reset state
+    activeSessionId.value = null
+    activePane.value = null
+    sessions.value = []
   }
 
   // Pane subscription
@@ -511,8 +599,15 @@ export const useTmuxStore = defineStore('tmux', () => {
   const lastPong = ref<number>(0)
 
   async function requestIceConfig(peerId: string): Promise<IceConfig> {
-    return new Promise((resolve) => {
-      iceConfigResolvers.set(peerId, resolve)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        iceConfigResolvers.delete(peerId)
+        reject(new Error('ICE config timeout'))
+      }, 10000)
+      iceConfigResolvers.set(peerId, (config) => {
+        clearTimeout(timer)
+        resolve(config)
+      })
       sendMsg({ t: 'ice_req', peer_id: peerId })
     })
   }
@@ -548,15 +643,15 @@ export const useTmuxStore = defineStore('tmux', () => {
       console.log(`[oxmux] connecting QUIC P2P to ${url}`)
       const conn = await doConnect(url, token)
 
-      // Switch transport to P2P for pane I/O
-      transportSend = (msg) => conn.send(msg)
-      transportClose = () => conn.close()
+      // Set P2P as data plane (WS remains control plane)
+      p2pSend = (msg) => conn.send(msg)
+      p2pClose = () => conn.close()
       activeTransportMode.value = 'quic_p2p'
 
       conn.onMessage((msg) => handleServerMsg(msg))
       conn.onClose(() => {
-        console.warn('[oxmux] P2P connection lost, falling back to SSH')
-        activeTransportMode.value = 'ssh'
+        console.warn('[oxmux] QUIC P2P connection lost')
+        teardownP2P()
       })
 
       console.log('[oxmux] QUIC P2P connected!')
@@ -564,17 +659,16 @@ export const useTmuxStore = defineStore('tmux', () => {
       // Tell agent which tmux session to attach to
       const activeSess = managedSessions.value.find(s => s.id === activeSessionId.value)
       if (activeSess) {
-        sendMsg({ t: 'sess_connect', name: activeSess.name })
+        p2pSend({ t: 'sess_connect', name: activeSess.name })
       }
 
-      // Re-subscribe all active panes on the new transport
+      // Re-subscribe all active panes on the P2P transport
       for (const paneId of paneHandlers.keys()) {
-        console.log('[oxmux] re-subscribing pane on P2P:', paneId)
-        sendMsg({ t: 'sub', pane: paneId })
+        p2pSend({ t: 'sub', pane: paneId })
       }
     } catch (e) {
       console.error('[oxmux] QUIC P2P failed:', e)
-      activeTransportMode.value = 'ssh'
+      teardownP2P()
     }
   }
 
@@ -615,5 +709,8 @@ export const useTmuxStore = defineStore('tmux', () => {
     checkAgentStatus,
     installAgent,
     upgradeTransport,
+    // Transport management
+    teardownP2P,
+    cleanupSession,
   }
 })
