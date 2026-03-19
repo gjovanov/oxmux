@@ -100,7 +100,7 @@
         <!-- tmux tree for connected session -->
         <template v-if="ms.status === 'connected'">
           <div
-            v-for="session in (store.activeSessionId === ms.id ? store.sessions : ms.tmux_sessions || [])"
+            v-for="session in getSessionTrees(ms.id)"
             :key="session.id"
             class="session-node"
           >
@@ -124,8 +124,8 @@
                 v-for="pane in window.panes"
                 :key="pane.id"
                 class="pane-node"
-                :class="{ active: pane.isActive, claude: pane.isClaude, selected: store.activeSessionId === ms.id && store.activePane === pane.id }"
-                @click="switchToSession(ms.id, pane.id)"
+                :class="{ active: pane.isActive, claude: pane.isClaude, selected: store.activePane === qualifyPaneId(ms.id, pane.id) }"
+                @click="selectPane(ms.id, pane.id)"
               >
                 <span class="pane-icon">{{ pane.isClaude ? '&#x1F916;' : '&#x25B8;' }}</span>
                 <span class="pane-cmd">{{ pane.currentCommand }}</span>
@@ -150,18 +150,21 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useTmuxStore } from '@/stores/tmux'
+import { qualifyPaneId } from '@/utils/paneId'
 
 const store = useTmuxStore()
 
-const transportLabel = computed(() => {
-  const mode = store.activeTransportMode
+function transportLabelFor(sessionId?: string): string {
+  const mode = sessionId ? store.getTransportMode(sessionId) : store.activeTransportMode
   const labels: Record<string, string> = {
-    'ssh': 'WS → Server → SSH',
-    'quic_p2p': 'QUIC P2P → Agent',
-    'webrtc_p2p': 'WebRTC P2P → Agent',
+    'ssh': 'WS → SSH',
+    'quic_p2p': 'QUIC P2P',
+    'webrtc_p2p': 'WebRTC P2P',
   }
   return labels[mode] || mode
-})
+}
+
+const transportLabel = computed(() => transportLabelFor(store.focusedSessionId || undefined))
 
 const statusLabel = computed(() => ({
   connected: 'Connected',
@@ -170,12 +173,13 @@ const statusLabel = computed(() => ({
   disconnected: 'Disconnected',
 }[store.connectionStatus]))
 
-function switchToSession(sessionId: string, paneId: string) {
-  if (store.activeSessionId !== sessionId) {
-    // Switching to a different session — reconnect it (cleans up old session)
-    store.connectSession(sessionId)
-  }
-  store.activePane = paneId
+function selectPane(sessionId: string, paneId: string) {
+  store.focusedSessionId = sessionId
+  store.activePane = qualifyPaneId(sessionId, paneId)
+}
+
+function getSessionTrees(sessionId: string) {
+  return store.sessionTrees.get(sessionId) || store.managedSessions.find(s => s.id === sessionId)?.tmux_sessions || []
 }
 
 function getAgentStatus(ms: any): string {
