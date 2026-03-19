@@ -28,7 +28,7 @@ FROM node:22-slim AS client-builder
 
 WORKDIR /build
 COPY client/package.json client/package-lock.json* ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 
 COPY client/ ./
 RUN npx vite build

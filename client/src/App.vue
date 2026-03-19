@@ -4,7 +4,28 @@
     <SessionSidebar />
     <NewSessionDialog v-if="store.showNewSessionDialog" />
     <main class="pane-area">
-      <template v-if="store.activePane">
+      <!-- View mode toggle -->
+      <div class="view-toggle" v-if="store.connectedSessionIds.size > 0">
+        <button
+          class="toggle-btn"
+          :class="{ active: viewMode === 'single' }"
+          @click="viewMode = 'single'"
+        >Single</button>
+        <button
+          class="toggle-btn"
+          :class="{ active: viewMode === 'mashed' }"
+          @click="viewMode = 'mashed'"
+        >Mashed</button>
+      </div>
+
+      <!-- Mashed view -->
+      <MashedView
+        v-if="viewMode === 'mashed'"
+        @switch-view="viewMode = $event"
+      />
+
+      <!-- Single pane view -->
+      <template v-else-if="store.activePane">
         <ClaudePane
           v-if="activeIsClaudePane"
           :session-id="store.activePane"
@@ -17,6 +38,7 @@
           :is-active="true"
         />
       </template>
+
       <div v-else class="empty-pane">
         <div class="empty-message">
           <div class="user-bar">
@@ -32,17 +54,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useTmuxStore } from '@/stores/tmux'
+import { parseQualifiedPaneId } from '@/utils/paneId'
 import LoginPage from '@/components/LoginPage.vue'
 import SessionSidebar from '@/components/SessionSidebar.vue'
 import NewSessionDialog from '@/components/NewSessionDialog.vue'
 import TerminalPane from '@/components/TerminalPane.vue'
 import ClaudePane from '@/components/ClaudePane.vue'
+import MashedView from '@/components/MashedView.vue'
 
 const auth = useAuthStore()
 const store = useTmuxStore()
+
+const viewMode = ref<'single' | 'mashed'>(
+  (localStorage.getItem('oxmux_view_mode') as 'single' | 'mashed') || 'single'
+)
+watch(viewMode, (v) => localStorage.setItem('oxmux_view_mode', v))
 
 const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 
@@ -60,7 +89,6 @@ onMounted(async () => {
   }
 })
 
-// Reconnect WS when auth state changes (login/logout)
 watch(() => auth.isAuthenticated, (isAuth) => {
   if (isAuth) {
     connectWs()
@@ -69,7 +97,8 @@ watch(() => auth.isAuthenticated, (isAuth) => {
 
 const activeIsClaudePane = computed(() => {
   if (!store.activePane) return false
-  return store.allPanes.find(p => p.id === store.activePane)?.isClaude ?? false
+  const { paneId } = parseQualifiedPaneId(store.activePane)
+  return store.allPanes.find(p => p.qualifiedId === store.activePane)?.isClaude ?? false
 })
 
 function openDiff(path: string) {
@@ -96,6 +125,21 @@ body { background: #1e1e2e; color: #cdd6f4; font-family: system-ui, sans-serif; 
   flex-direction: column;
   overflow: hidden;
 }
+.view-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #313244;
+  flex-shrink: 0;
+}
+.toggle-btn {
+  background: #313244; border: none; color: #a6adc8;
+  padding: 2px 12px; border-radius: 4px; font-size: 11px;
+  cursor: pointer; font-weight: 600;
+}
+.toggle-btn:hover { background: #45475a; }
+.toggle-btn.active { background: #89b4fa; color: #1e1e2e; }
+
 .empty-pane {
   flex: 1;
   display: flex;
