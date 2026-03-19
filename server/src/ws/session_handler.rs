@@ -40,19 +40,19 @@ pub async fn handle_client_msg(
     use crate::webrtc::turn::{build_ice_config, generate_turn_credentials};
 
     match msg {
-        ClientMsg::Subscribe { pane } => {
+        ClientMsg::Subscribe { pane, session_id: _ } => {
             info!(pane = %pane, "client subscribing to pane");
             let sender = state.get_or_create_pane_channel(&pane);
             conn.pane_subs.insert(pane, sender.subscribe());
             None
         }
 
-        ClientMsg::Unsubscribe { pane } => {
+        ClientMsg::Unsubscribe { pane, session_id: _ } => {
             conn.pane_subs.remove(&pane);
             None
         }
 
-        ClientMsg::Resize { pane, cols, rows } => {
+        ClientMsg::Resize { pane, cols, rows, session_id: _ } => {
             debug!("Resize pane {} to {}x{}", pane, cols, rows);
             if let Err(e) = state.session_manager.resize_pane(&pane, cols, rows).await {
                 warn!("Failed to resize pane {}: {}", pane, e);
@@ -78,7 +78,7 @@ pub async fn handle_client_msg(
             }
         }
 
-        ClientMsg::Input { pane, data } => {
+        ClientMsg::Input { pane, data, session_id: _ } => {
             if let Err(e) = state.session_manager.send_input_to_pane(&pane, &data).await {
                 warn!("Failed to send input to pane {}: {}", pane, e);
             }
@@ -451,6 +451,7 @@ pub fn drain_pane_outputs(conn: &mut ConnectionState) -> Vec<Vec<u8>> {
                     let msg = ServerMsg::Output {
                         pane: pane_id.clone(),
                         data,
+                        session_id: None, // TODO: add session_id once pane_subs is session-scoped
                     };
                     if let Ok(encoded) = encode_server_msg(&msg) {
                         frames.push(encoded);

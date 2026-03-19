@@ -11,7 +11,13 @@ use crate::webrtc::turn::IceConfig;
 pub enum ServerMsg {
     /// Raw PTY output for a pane (binary terminal bytes)
     #[serde(rename = "o")]
-    Output { pane: String, data: Bytes },
+    Output {
+        pane: String,
+        data: Bytes,
+        /// Optional session ID for multi-session disambiguation
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
 
     /// Full tmux state dump (on connect or reconnect)
     #[serde(rename = "s")]
@@ -113,19 +119,38 @@ pub enum ServerMsg {
 pub enum ClientMsg {
     /// Subscribe to a pane's output stream
     #[serde(rename = "sub")]
-    Subscribe { pane: String },
+    Subscribe {
+        pane: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
 
     /// Unsubscribe from a pane
     #[serde(rename = "unsub")]
-    Unsubscribe { pane: String },
+    Unsubscribe {
+        pane: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
 
     /// Keyboard/paste input for a pane
     #[serde(rename = "i")]
-    Input { pane: String, data: Bytes },
+    Input {
+        pane: String,
+        data: Bytes,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
 
     /// Resize notification (browser terminal resized)
     #[serde(rename = "r")]
-    Resize { pane: String, cols: u16, rows: u16 },
+    Resize {
+        pane: String,
+        cols: u16,
+        rows: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
 
     /// Raw tmux command (e.g. "new-session -s foo")
     #[serde(rename = "cmd")]

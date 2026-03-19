@@ -27,6 +27,7 @@
           <span class="transport-badge" :class="ms.transport.backend?.type || 'local'">{{ ms.transport.backend?.type || 'local' }}</span>
           <span class="browser-badge" :class="ms.transport.browser || 'websocket'">{{ ms.transport.browser || 'ws' }}</span>
           <span class="ms-name">{{ ms.name }}</span>
+          <span v-if="store.connectedSessionIds.has(ms.id)" class="ms-connected-dot" title="Connected" />
           <span class="ms-status" :class="ms.status">{{ ms.status }}</span>
         </div>
 
@@ -66,21 +67,21 @@
               <span class="agent-version">v{{ getAgentVersion(ms) }}</span>
             </div>
             <div class="transport-switch">
-              <span class="current-transport" :class="store.activeTransportMode">{{ transportLabel }}</span>
+              <span class="current-transport" :class="store.getTransportMode(ms.id)">{{ transportLabelFor(ms.id) }}</span>
               <button
-                v-if="store.activeTransportMode === 'ssh'"
+                v-if="store.getTransportMode(ms.id) === 'ssh'"
                 class="action-btn p2p"
                 @click="store.upgradeTransport(ms.id, 'quic_p2p')"
               >QUIC P2P</button>
               <button
-                v-if="store.activeTransportMode === 'ssh'"
+                v-if="store.getTransportMode(ms.id) === 'ssh'"
                 class="action-btn p2p"
                 @click="connectWebRtcP2P(ms)"
               >WebRTC P2P</button>
               <button
-                v-if="store.activeTransportMode !== 'ssh'"
+                v-if="store.getTransportMode(ms.id) !== 'ssh'"
                 class="action-btn disconnect"
-                @click="store.teardownP2P()"
+                @click="store.teardownP2P(ms.id)"
               >Back to SSH</button>
             </div>
           </template>
@@ -273,6 +274,7 @@ function claudeCost(paneId: string): string {
 .ms-status.disconnected { color: #a6adc8; }
 .ms-status.error { color: #f38ba8; }
 .ms-status.reconnecting { color: #f9e2af; }
+.ms-connected-dot { width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1; flex-shrink: 0; }
 .ms-actions {
   display: flex; gap: 4px; margin-top: 6px;
 }
