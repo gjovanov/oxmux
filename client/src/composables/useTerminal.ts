@@ -59,8 +59,58 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Ctrl+V/Cmd+V paste: xterm.js handles this natively via its internal textarea.
-    // Pasted text fires through t.onData() which sends to server — no extra handling needed.
+    // Handle Ctrl+C (copy) and Ctrl+V (paste) explicitly.
+    // Without this, xterm sends raw \x03 and \x16 control chars to the remote terminal.
+    t.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      // Only handle keydown, not keyup
+      if (ev.type !== 'keydown') return true
+
+      const isMod = ev.ctrlKey || ev.metaKey
+
+      // Ctrl+C / Cmd+C: copy selection to clipboard (if text selected)
+      if (isMod && ev.key === 'c') {
+        const selection = t.getSelection()
+        if (selection) {
+          navigator.clipboard.writeText(selection).catch(() => {})
+          t.clearSelection()
+          return false // prevent xterm from sending \x03
+        }
+        // No selection → let xterm send \x03 (SIGINT) normally
+        return true
+      }
+
+      // Ctrl+V / Cmd+V: paste from clipboard
+      if (isMod && ev.key === 'v') {
+        navigator.clipboard.readText().then(text => {
+          if (text && paneId.value) {
+            store.sendInput(paneId.value, new TextEncoder().encode(text))
+          }
+        }).catch(() => {})
+        return false // prevent xterm from sending \x16
+      }
+
+      // Ctrl+Shift+C: always copy
+      if (isMod && ev.shiftKey && ev.key === 'C') {
+        const selection = t.getSelection()
+        if (selection) {
+          navigator.clipboard.writeText(selection).catch(() => {})
+          t.clearSelection()
+        }
+        return false
+      }
+
+      // Ctrl+Shift+V: always paste
+      if (isMod && ev.shiftKey && ev.key === 'V') {
+        navigator.clipboard.readText().then(text => {
+          if (text && paneId.value) {
+            store.sendInput(paneId.value, new TextEncoder().encode(text))
+          }
+        }).catch(() => {})
+        return false
+      }
+
+      return true // all other keys handled by xterm normally
+    })
 
     // Right-click paste (not built into xterm.js)
     contextMenuHandler = async (e: MouseEvent) => {
