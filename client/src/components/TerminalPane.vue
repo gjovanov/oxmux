@@ -16,7 +16,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, toRef } from 'vue'
 import { useTerminal } from '@/composables/useTerminal'
 
 const props = defineProps<{
@@ -30,9 +30,13 @@ const emit = defineEmits<{
 
 const containerRef = ref<HTMLElement | null>(null)
 const paneIdRef = ref(props.paneId)
+const isActiveRef = ref(props.isActive ?? false)
 const accessibleBuffer = ref('')
 
-const { term, focus } = useTerminal(paneIdRef, containerRef)
+// Sync isActive prop to ref
+watch(() => props.isActive, (v) => { isActiveRef.value = !!v })
+
+const { term, focus } = useTerminal(paneIdRef, containerRef, isActiveRef)
 
 // Keep accessible buffer updated (last 500 chars, for E2E tests)
 onMounted(() => {
