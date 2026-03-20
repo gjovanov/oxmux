@@ -60,93 +60,47 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // ── DIAGNOSTIC: log every key event and paste event ──────────────
+    // Ctrl+C: copy selection to clipboard. Ctrl+V: let browser paste natively.
     t.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-      if (ev.type === 'keydown') {
-        const isMod = ev.ctrlKey || ev.metaKey
-        // Log all modifier keys and arrow keys
-        if (isMod || ev.key.startsWith('Arrow')) {
-          console.log('[oxmux-key]', ev.type, ev.key, 'ctrl:', ev.ctrlKey, 'meta:', ev.metaKey, 'shift:', ev.shiftKey)
-        }
+      if (ev.type !== 'keydown') return true
+      const isMod = ev.ctrlKey || ev.metaKey
 
-        // Ctrl+C: copy selection
-        if (isMod && (ev.key === 'c' || ev.key === 'C')) {
-          if (ev.shiftKey || t.getSelection()) {
-            const selection = t.getSelection()
-            console.log('[oxmux-copy] selection:', selection?.slice(0, 50))
-            if (selection) {
-              navigator.clipboard.writeText(selection).catch(e => console.warn('[oxmux-copy] failed:', e))
-              t.clearSelection()
-            }
-            return false
+      // Ctrl+C with selection → copy to clipboard
+      if (isMod && (ev.key === 'c' || ev.key === 'C')) {
+        if (ev.shiftKey || t.getSelection()) {
+          const selection = t.getSelection()
+          if (selection) {
+            navigator.clipboard.writeText(selection).catch(() => {})
+            t.clearSelection()
           }
-          console.log('[oxmux-key] Ctrl+C → SIGINT (no selection)')
-          return true
-        }
-
-        // Ctrl+V: paste
-        if (isMod && (ev.key === 'v' || ev.key === 'V')) {
-          console.log('[oxmux-paste] Ctrl+V intercepted, returning false to let browser paste')
           return false
         }
+        return true // no selection → \x03 SIGINT
       }
+
+      // Ctrl+V → return false to prevent xterm sending \x16
+      // Browser fires native paste event → xterm handles it → onData fires
+      if (isMod && (ev.key === 'v' || ev.key === 'V')) {
+        return false
+      }
+
       return true
     })
 
-    // Log what onData receives (first 20 chars, hex for control chars)
-    const origOnData = t.onData((data: string) => {
-      const hex = Array.from(data).map(c => {
-        const code = c.charCodeAt(0)
-        return code < 32 ? `\\x${code.toString(16).padStart(2, '0')}` : c
-      }).join('')
-      if (data.length <= 3) {
-        console.log('[oxmux-onData]', JSON.stringify(data), '→ hex:', hex)
-      }
-      store.sendInput(paneId.value, new TextEncoder().encode(data))
-    })
+    // Paste: xterm handles Ctrl+V natively via its textarea.
+    // attachCustomKeyEventHandler returns false → prevents \x16
+    // Browser fires paste event → xterm reads clipboardData → onData fires
+    // No extra paste handler needed (would cause duplicates).
 
-    // Listen for paste events everywhere
-    const xtermEl = containerRef.value.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null
-    console.log('[oxmux-init] xterm textarea found:', !!xtermEl)
-
-    const handlePaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData('text/plain')
-      console.log('[oxmux-paste] paste event fired on', (e.target as HTMLElement)?.className, 'text:', text?.slice(0, 50), 'clipboardData:', !!e.clipboardData)
-      if (text && paneId.value) {
-        e.preventDefault()
-        e.stopPropagation()
-        store.sendInput(paneId.value, new TextEncoder().encode(text))
-        return
-      }
-      // Fallback: clipboard API
-      navigator.clipboard.readText()
-        .then(clipText => {
-          console.log('[oxmux-paste] clipboard API returned:', clipText?.slice(0, 50))
-          if (clipText && paneId.value) {
-            store.sendInput(paneId.value, new TextEncoder().encode(clipText))
-          }
-        })
-        .catch(err => console.warn('[oxmux-paste] clipboard API failed:', err))
-      e.preventDefault()
-    }
-
-    if (xtermEl) {
-      xtermEl.addEventListener('paste', handlePaste)
-      cleanupFns.push(() => xtermEl.removeEventListener('paste', handlePaste))
-    }
-    containerRef.value.addEventListener('paste', handlePaste)
-    cleanupFns.push(() => containerRef.value?.removeEventListener('paste', handlePaste))
-
-    // Right-click paste
+    // Right-click paste (not built into xterm.js)
     const ctxHandler = async (e: MouseEvent) => {
       e.preventDefault()
       try {
         const text = await navigator.clipboard.readText()
-        console.log('[oxmux-paste] right-click clipboard:', text?.slice(0, 50))
         if (text && paneId.value) {
           store.sendInput(paneId.value, new TextEncoder().encode(text))
         }
-      } catch (err) { console.warn('[oxmux-paste] right-click failed:', err) }
+      } catch { /* clipboard API not available or permission denied */ }
     }
     containerRef.value.addEventListener('contextmenu', ctxHandler)
     cleanupFns.push(() => containerRef.value?.removeEventListener('contextmenu', ctxHandler as EventListener))
@@ -159,7 +113,11 @@ export function useTerminal(
 
     term.value = t
 
-    // ── I/O (onData is registered above with logging) ──────────────
+    // ── I/O ───────────────────────────────────────────────────────────
+    t.onData((data: string) => {
+      store.sendInput(paneId.value, new TextEncoder().encode(data))
+    })
+
     t.onBinary((data: string) => {
       const bytes = Uint8Array.from(data, c => c.charCodeAt(0))
       store.sendInput(paneId.value, bytes)
