@@ -253,8 +253,9 @@ pub async fn handle_client_msg(
                             let key_data = tokio::fs::read_to_string(&expanded).await?;
 
                             // Handle encrypted keys
+                            let passphrase_str = passphrase.as_ref().map(|p| p.expose_secret().to_string());
                             let key_data = if key_data.contains("DES-EDE3-CBC") || key_data.contains("DES-CBC") {
-                                let pass = passphrase.as_deref().unwrap_or("");
+                                let pass = passphrase_str.as_deref().unwrap_or("");
                                 let output = tokio::process::Command::new("openssl")
                                     .args(["rsa", "-in", &expanded, "-passin", &format!("pass:{}", pass), "-traditional"])
                                     .output().await?;
@@ -266,12 +267,28 @@ pub async fn handle_client_msg(
                                 key_data
                             };
 
-                            let decode_pass = if key_data.starts_with("-----BEGIN PRIVATE KEY-----") { None } else { passphrase.as_deref() };
+                            let decode_pass = if key_data.starts_with("-----BEGIN PRIVATE KEY-----") { None } else { passphrase_str.as_deref() };
                             let key_pair = russh_keys::decode_secret_key(&key_data, decode_pass)?;
                             ssh.authenticate_publickey(&user, std::sync::Arc::new(key_pair)).await?;
                         }
                         crate::session::types::SshAuthConfig::Password { password } => {
-                            ssh.authenticate_password(&user, password).await?;
+                            ssh.authenticate_password(&user, password.expose_secret()).await?;
+                        }
+                        crate::session::types::SshAuthConfig::UploadedKey { key_id, passphrase } => {
+                            // Clone data out of DashMap guard to avoid holding across await
+                            let (key_str, pp) = {
+                                let entry = state_clone.session_manager.ephemeral_keys
+                                    .get(key_id)
+                                    .ok_or_else(|| anyhow::anyhow!("uploaded key '{}' not found in memory", key_id))?;
+                                let (k, sp) = entry.value();
+                                (
+                                    k.expose_secret().to_string(),
+                                    sp.as_ref().or(passphrase.as_ref()).map(|p| p.expose_secret().to_string()),
+                                )
+                            };
+                            let decode_pass = if key_str.starts_with("-----BEGIN PRIVATE KEY-----") { None } else { pp.as_deref() };
+                            let key_pair = russh_keys::decode_secret_key(&key_str, decode_pass)?;
+                            ssh.authenticate_publickey(&user, std::sync::Arc::new(key_pair)).await?;
                         }
                         crate::session::types::SshAuthConfig::Agent => {
                             ssh.authenticate_none(&user).await?;
@@ -319,6 +336,14 @@ pub async fn handle_client_msg(
                         if online {
                             let agent_id = uuid::Uuid::new_v4().to_string();
 
+                            // Read agent's TLS cert hash for WebTransport cert pinning
+                            let cert_hash = crate::agent::deployer::exec_ssh_command(
+                                &ssh_handle,
+                                "openssl x509 -in /etc/oxmux-agent/cert.pem -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//;s/://g' || echo ''"
+                            ).await.ok()
+                                .map(|h| h.trim().to_lowercase().to_string())
+                                .filter(|h| !h.is_empty() && h.len() == 64);
+
                             // Register in agent registry
                             state_clone.agent_registry.register(crate::agent::registry::AgentInfo {
                                 id: agent_id.clone(),
@@ -330,6 +355,7 @@ pub async fn handle_client_msg(
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs(),
+                                cert_hash,
                             });
 
                             let _ = async_tx.send(ServerMsg::AgentStatus {
@@ -414,21 +440,23 @@ pub async fn handle_client_msg(
                         session_id = %session_id,
                         target = %target,
                         agent_id = %agent.id,
+                        agent_host = %agent.host,
                         "transport upgrade ready"
                     );
                     // Map host IP to agent DNS name (*.oxmux.app wildcard cert)
-                    let agent_host_str = match agent.host.as_str() {
+                    let agent_host = match agent.host.as_str() {
                         "94.130.141.98" => "agent-mars.oxmux.app".to_string(),
                         "5.9.157.226" => "agent-zeus.oxmux.app".to_string(),
                         "5.9.157.221" => "agent-jupiter.oxmux.app".to_string(),
-                        _ => format!("agent.oxmux.app"), // fallback
+                        other => format!("agent-{}.oxmux.app", other.replace('.', "-")),
                     };
                     Some(ServerMsg::TransportUpgradeReady {
                         session_id,
-                        agent_host: agent_host_str,
+                        agent_host,
                         agent_port: agent.quic_port,
                         agent_token: token,
                         target: Some(target),
+                        cert_hash: agent.cert_hash.clone(),
                     })
                 }
                 Err(e) => Some(ServerMsg::TransportUpgradeFailed {

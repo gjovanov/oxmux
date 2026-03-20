@@ -65,6 +65,7 @@ export type SshAuth =
   | { method: 'agent' }
   | { method: 'password'; password: string }
   | { method: 'private_key'; path: string; passphrase?: string }
+  | { method: 'uploaded_key'; key_id: string }
 
 export interface SshBackend {
   type: 'ssh'
@@ -287,14 +288,14 @@ export const useTmuxStore = defineStore('tmux', () => {
 
   // ── P2P Connections (per-session) ────────────────────────────────────
 
-  async function connectWebRtcTransport(sessionId: string, agentHost: string, agentPort: number, token: string) {
+  async function connectWebRtcTransport(sessionId: string, agentHost: string, agentPort: number, token: string, certHash?: ArrayBuffer) {
     const { connectWebRtc } = await import('@/composables/useWebRtc')
     const { connectQuic: doQuic } = await import('@/composables/useQuic')
 
     try {
       const quicUrl = `https://${agentHost}:${agentPort}`
       console.log(`[oxmux] [${sessionId.slice(0, 8)}] opening QUIC signaling for WebRTC`)
-      const quicConn = await doQuic(quicUrl, token)
+      const quicConn = await doQuic(quicUrl, token, certHash)
 
       const sess = managedSessions.value.find(s => s.id === sessionId)
       quicConn.send({ t: 'sess_connect', name: sess?.name || 'default' })
@@ -356,7 +357,7 @@ export const useTmuxStore = defineStore('tmux', () => {
       teardownP2P(sessionId)
 
       try {
-        await connectQuicP2P(sessionId, agentHost, agentPort, token)
+        await connectQuicP2P(sessionId, agentHost, agentPort, token, certHash)
       } catch (quicErr) {
         console.error(`[oxmux] [${sessionId.slice(0, 8)}] QUIC fallback also failed:`, quicErr)
         teardownP2P(sessionId)
@@ -364,12 +365,12 @@ export const useTmuxStore = defineStore('tmux', () => {
     }
   }
 
-  async function connectQuicP2P(sessionId: string, host: string, port: number, token: string) {
+  async function connectQuicP2P(sessionId: string, host: string, port: number, token: string, certHash?: ArrayBuffer) {
     const { connectQuic: doConnect } = await import('@/composables/useQuic')
 
     const url = `https://${host}:${port}`
     console.log(`[oxmux] [${sessionId.slice(0, 8)}] connecting QUIC P2P to ${url}`)
-    const conn = await doConnect(url, token)
+    const conn = await doConnect(url, token, certHash)
 
     p2pConnections.set(sessionId, {
       sessionId,
@@ -603,12 +604,20 @@ export const useTmuxStore = defineStore('tmux', () => {
         const host = msg.agent_host as string
         const port = msg.agent_port as number
         const target = msg.target as string | undefined
-        console.log(`[oxmux] transport upgrade ready: ${host}:${port} (${target || 'quic_p2p'})`)
+        const certHashHex = msg.cert_hash as string | undefined
+        console.log(`[oxmux] transport upgrade ready: ${host}:${port} (${target || 'quic_p2p'})${certHashHex ? ' cert_hash=' + certHashHex.slice(0, 16) + '...' : ''}`)
+
+        // Convert hex cert hash to ArrayBuffer for WebTransport cert pinning
+        let certHash: ArrayBuffer | undefined
+        if (certHashHex && /^[0-9a-f]{64}$/.test(certHashHex)) {
+          const bytes = new Uint8Array(certHashHex.match(/.{2}/g)!.map(b => parseInt(b, 16)))
+          certHash = bytes.buffer
+        }
 
         if (target === 'webrtc_p2p') {
-          connectWebRtcTransport(sid, host, port, token)
+          connectWebRtcTransport(sid, host, port, token, certHash)
         } else {
-          connectQuicP2P(sid, host, port, token)
+          connectQuicP2P(sid, host, port, token, certHash)
         }
         break
       }

@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use russh::client;
 use russh::ChannelMsg;
 use russh_keys::key;
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, error, info, warn};
@@ -34,6 +35,8 @@ pub struct SshTransport {
     reader_task: Option<tokio::task::JoinHandle<()>>,
     /// Cached tmux state
     tmux_state: Arc<Mutex<Vec<TmuxSessionInfo>>>,
+    /// Ephemeral key store for uploaded keys (shared with SessionManager)
+    ephemeral_keys: Arc<DashMap<String, (SecretString, Option<SecretString>)>>,
 }
 
 struct SshHandler;
@@ -58,6 +61,7 @@ impl SshTransport {
         auth: SshAuthConfig,
         session_name: String,
         shared_pane_outputs: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
+        ephemeral_keys: Arc<DashMap<String, (SecretString, Option<SecretString>)>>,
     ) -> Self {
         Self {
             host,
@@ -71,6 +75,7 @@ impl SshTransport {
             shared_pane_outputs,
             reader_task: None,
             tmux_state: Arc::new(Mutex::new(Vec::new())),
+            ephemeral_keys,
         }
     }
 
@@ -233,7 +238,7 @@ impl Transport for SshTransport {
             }
             SshAuthConfig::Password { password } => {
                 let accepted = handle
-                    .authenticate_password(&self.user, password)
+                    .authenticate_password(&self.user, password.expose_secret())
                     .await
                     .context("SSH password auth failed")?;
                 if !accepted {
@@ -251,6 +256,7 @@ impl Transport for SshTransport {
                     .await
                     .context(format!("failed to read SSH key at {}", expanded_path))?;
 
+                let passphrase_str = passphrase.as_ref().map(|p| p.expose_secret().to_string());
                 info!(
                     path = %expanded_path,
                     has_passphrase = passphrase.is_some(),
@@ -260,7 +266,7 @@ impl Transport for SshTransport {
 
                 // russh_keys doesn't support DES-EDE3-CBC — convert via openssl
                 let key_data = if key_data.contains("DES-EDE3-CBC") || key_data.contains("DES-CBC") {
-                    let pass = passphrase.as_deref().unwrap_or("");
+                    let pass = passphrase_str.as_deref().unwrap_or("");
                     info!("converting encrypted key via openssl");
                     let output = tokio::process::Command::new("openssl")
                         .args(["rsa", "-in", &expanded_path, "-passin", &format!("pass:{}", pass), "-traditional"])
@@ -280,7 +286,7 @@ impl Transport for SshTransport {
                 let decode_pass = if key_data.starts_with("-----BEGIN PRIVATE KEY-----") {
                     None // PKCS#8 unencrypted
                 } else {
-                    passphrase.as_deref()
+                    passphrase_str.as_deref()
                 };
                 let key_pair = russh_keys::decode_secret_key(&key_data, decode_pass)
                     .context(format!("failed to decode SSH key at '{}'", expanded_path))?;
@@ -290,6 +296,36 @@ impl Transport for SshTransport {
                     .context("SSH pubkey auth failed")?;
                 if !accepted {
                     anyhow::bail!("SSH public key rejected");
+                }
+            }
+            SshAuthConfig::UploadedKey { key_id, passphrase } => {
+                // Clone data out of DashMap guard to avoid holding it across await
+                let (key_str, pp) = {
+                    let entry = self.ephemeral_keys
+                        .get(key_id)
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "uploaded key '{}' not found in memory (server may have restarted — re-upload the key)", key_id
+                        ))?;
+                    let (k, sp) = entry.value();
+                    (
+                        k.expose_secret().to_string(),
+                        sp.as_ref().or(passphrase.as_ref()).map(|p| p.expose_secret().to_string()),
+                    )
+                }; // guard dropped here
+
+                let decode_pass = if key_str.starts_with("-----BEGIN PRIVATE KEY-----") {
+                    None
+                } else {
+                    pp.as_deref()
+                };
+                let key_pair = russh_keys::decode_secret_key(&key_str, decode_pass)
+                    .context(format!("failed to decode uploaded SSH key '{}'", key_id))?;
+                let accepted = handle
+                    .authenticate_publickey(&self.user, Arc::new(key_pair))
+                    .await
+                    .context("SSH pubkey auth (uploaded key) failed")?;
+                if !accepted {
+                    anyhow::bail!("SSH uploaded key rejected");
                 }
             }
         }

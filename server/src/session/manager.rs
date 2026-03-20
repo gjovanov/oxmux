@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
+use secrecy::SecretString;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
@@ -26,6 +27,9 @@ pub struct SessionManager {
     /// Database pool for persistence
     db: SqlitePool,
     pub signaler: Arc<WebRtcSignaler>,
+    /// Ephemeral key store: key_id → (PEM key data, optional passphrase)
+    /// Keys uploaded from browser, never persisted to disk.
+    pub ephemeral_keys: Arc<DashMap<String, (SecretString, Option<SecretString>)>>,
 }
 
 struct SessionEntry {
@@ -44,6 +48,7 @@ impl SessionManager {
             shared_pane_outputs,
             db,
             signaler: Arc::new(WebRtcSignaler::new()),
+            ephemeral_keys: Arc::new(DashMap::new()),
         }
     }
 
@@ -92,6 +97,7 @@ impl SessionManager {
                     auth.clone(),
                     meta.name.clone(),
                     self.shared_pane_outputs.clone(),
+                    self.ephemeral_keys.clone(),
                 ))
             }
             BackendTransport::Agent { host, port, .. } => {
@@ -168,6 +174,12 @@ impl SessionManager {
 
         let mut transport = entry.transport.lock().await;
         let _ = transport.disconnect().await;
+
+        // Clean up ephemeral key if this session used one
+        if let BackendTransport::Ssh { auth: SshAuthConfig::UploadedKey { ref key_id, .. }, .. } = entry.meta.transport.backend {
+            self.ephemeral_keys.remove(key_id);
+            info!(key_id = %key_id, "ephemeral key removed on session delete");
+        }
 
         // Remove from DB
         repo::delete_session(&self.db, id).await?;

@@ -103,6 +103,9 @@ pub enum ServerMsg {
         /// "quic_p2p" or "webrtc_p2p"
         #[serde(skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// SHA-256 cert hash for WebTransport cert pinning (hex, lowercase)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cert_hash: Option<String>,
     },
 
     /// Transport upgrade failed

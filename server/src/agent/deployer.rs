@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use russh::client;
 use russh::ChannelMsg;
+use secrecy::ExposeSecret;
 use tracing::{info, warn};
 
 use super::binary;
@@ -57,7 +58,8 @@ pub async fn deploy_via_ssh(
             // Check if key is encrypted and needs conversion
             let key_content = tokio::fs::read_to_string(&expanded).await.unwrap_or_default();
             if key_content.contains("DES-EDE3-CBC") || key_content.contains("DES-CBC") || key_content.contains("Proc-Type: 4,ENCRYPTED") {
-                let pass = passphrase.as_deref().unwrap_or("");
+                let pass = passphrase.as_ref().map(|p| p.expose_secret().to_string()).unwrap_or_default();
+                let pass = pass.as_str();
                 let tmp_key = format!("/tmp/oxmux-scp-key-{}", std::process::id());
                 let output = tokio::process::Command::new("openssl")
                     .args(["rsa", "-in", &expanded, "-out", &tmp_key, "-passin", &format!("pass:{}", pass), "-traditional"])

@@ -80,6 +80,8 @@ async fn main() -> Result<()> {
         .route("/api/agents", get(agent::handler::list_agents))
         .route("/api/agents/:host/status", get(agent::handler::agent_status))
         .route("/api/agents/:agent_id/token", post(agent::handler::agent_token))
+        // SSH key upload (ephemeral)
+        .route("/api/ssh-keys", post(session::key_upload::upload_ssh_key))
         // Public
         .route("/api/ice-config", get(ws::handler::ice_config_handler))
         .route("/health", get(|| async { "ok" }))

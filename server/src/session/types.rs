@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
 use std::fmt;
 
 pub type SessionId = String;
@@ -75,18 +76,92 @@ fn default_agent_port() -> u16 {
 
 // ── SSH Auth ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Custom serde for SecretString — serializes the actual value (needed for DB persistence).
+mod secret_string_serde {
+    use secrecy::{ExposeSecret, SecretString};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(val: &SecretString, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(val.expose_secret())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SecretString, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(SecretString::new(raw.into()))
+    }
+}
+
+mod opt_secret_string_serde {
+    use secrecy::{ExposeSecret, SecretString};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(val: &Option<SecretString>, s: S) -> Result<S::Ok, S::Error> {
+        match val {
+            Some(v) => s.serialize_some(v.expose_secret()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SecretString>, D::Error> {
+        let raw = Option::<String>::deserialize(d)?;
+        Ok(raw.map(|r| SecretString::new(r.into())))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum SshAuthConfig {
     Agent,
     Password {
-        password: String,
+        #[serde(with = "secret_string_serde")]
+        password: SecretString,
     },
     PrivateKey {
         path: String,
-        #[serde(default)]
-        passphrase: Option<String>,
+        #[serde(default, with = "opt_secret_string_serde")]
+        passphrase: Option<SecretString>,
     },
+    /// Key uploaded from browser — key material stored in ephemeral memory only.
+    /// The key_id references an entry in SessionManager's ephemeral_keys DashMap.
+    UploadedKey {
+        key_id: String,
+        #[serde(default, with = "opt_secret_string_serde")]
+        passphrase: Option<SecretString>,
+    },
+}
+
+impl Clone for SshAuthConfig {
+    fn clone(&self) -> Self {
+        match self {
+            SshAuthConfig::Agent => SshAuthConfig::Agent,
+            SshAuthConfig::Password { password } => SshAuthConfig::Password {
+                password: SecretString::new(password.expose_secret().to_string().into()),
+            },
+            SshAuthConfig::PrivateKey { path, passphrase } => SshAuthConfig::PrivateKey {
+                path: path.clone(),
+                passphrase: passphrase.as_ref().map(|p| SecretString::new(p.expose_secret().to_string().into())),
+            },
+            SshAuthConfig::UploadedKey { key_id, passphrase } => SshAuthConfig::UploadedKey {
+                key_id: key_id.clone(),
+                passphrase: passphrase.as_ref().map(|p| SecretString::new(p.expose_secret().to_string().into())),
+            },
+        }
+    }
+}
+
+impl fmt::Debug for SshAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SshAuthConfig::Agent => write!(f, "SshAuthConfig::Agent"),
+            SshAuthConfig::Password { .. } => write!(f, "SshAuthConfig::Password {{ *** }}"),
+            SshAuthConfig::PrivateKey { path, passphrase } => {
+                write!(f, "SshAuthConfig::PrivateKey {{ path: {:?}, has_passphrase: {} }}", path, passphrase.is_some())
+            }
+            SshAuthConfig::UploadedKey { key_id, passphrase } => {
+                write!(f, "SshAuthConfig::UploadedKey {{ key_id: {:?}, has_passphrase: {} }}", key_id, passphrase.is_some())
+            }
+        }
+    }
 }
 
 impl Default for SshAuthConfig {
@@ -162,15 +237,19 @@ impl ManagedSession {
     pub fn sanitized(&self) -> Self {
         let mut s = self.clone();
         if let BackendTransport::Ssh { ref mut auth, .. } = s.transport.backend {
-            *auth = match auth.clone() {
+            *auth = match &*auth {
                 SshAuthConfig::Password { .. } => SshAuthConfig::Password {
-                    password: "***".to_string(),
+                    password: SecretString::new("***".to_string().into()),
                 },
                 SshAuthConfig::PrivateKey { path, .. } => SshAuthConfig::PrivateKey {
-                    path,
+                    path: path.clone(),
                     passphrase: None,
                 },
-                other => other,
+                SshAuthConfig::UploadedKey { key_id, .. } => SshAuthConfig::UploadedKey {
+                    key_id: key_id.clone(),
+                    passphrase: None,
+                },
+                other => other.clone(),
             };
         }
         s

@@ -12,6 +12,10 @@ pub struct AgentInfo {
     pub quic_port: u16,
     pub version: String,
     pub last_seen: u64,
+    /// SHA-256 hash of the agent's self-signed TLS cert (hex-encoded, lowercase).
+    /// Used for WebTransport cert pinning via serverCertificateHashes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_hash: Option<String>,
 }
 
 pub struct AgentRegistry {
