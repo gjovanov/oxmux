@@ -31,7 +31,6 @@ export function useTerminal(
   const searchAddon = new SearchAddon()
   let resizeObserver: ResizeObserver | null = null
   let contextMenuHandler: ((e: MouseEvent) => void) | null = null
-  let pasteCleanupFn: (() => void) | null = null
 
   function mount() {
     if (!containerRef.value || !paneId.value) {
@@ -60,13 +59,12 @@ export function useTerminal(
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Handle Ctrl+C (copy) and Ctrl+V (paste) explicitly.
-    // Without this, xterm sends raw \x03 and \x16 control chars to the remote terminal.
+    // Clipboard: Ctrl+C (copy) and Ctrl+V (paste)
     t.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
       if (ev.type !== 'keydown') return true
       const isMod = ev.ctrlKey || ev.metaKey
 
-      // Ctrl+C / Cmd+C: copy selection to clipboard (if text selected)
+      // Ctrl+C with selection → copy to clipboard
       if (isMod && (ev.key === 'c' || ev.key === 'C')) {
         if (ev.shiftKey || t.getSelection()) {
           const selection = t.getSelection()
@@ -74,44 +72,28 @@ export function useTerminal(
             navigator.clipboard.writeText(selection).catch(() => {})
             t.clearSelection()
           }
-          return false
+          return false // prevent xterm from sending \x03
         }
         return true // no selection → send \x03 (SIGINT)
       }
 
-      // Ctrl+V / Cmd+V / Ctrl+Shift+V: paste via browser native event
-      // Return false to prevent xterm sending \x16, then let browser fire paste event
+      // Ctrl+V → read clipboard and send as input
+      // xterm.js does NOT handle Ctrl+V paste natively — it sends raw \x16
       if (isMod && (ev.key === 'v' || ev.key === 'V')) {
-        return false
+        navigator.clipboard.readText()
+          .then(text => {
+            if (text && paneId.value) {
+              store.sendInput(paneId.value, new TextEncoder().encode(text))
+            }
+          })
+          .catch(err => {
+            console.warn('[oxmux] clipboard readText failed:', err)
+          })
+        return false // prevent xterm from sending \x16
       }
 
       return true
     })
-
-    // Paste handler: catches browser paste events triggered by Ctrl+V.
-    // xterm.js's internal textarea receives the paste event.
-    // We listen on the container and also on xterm's textarea element.
-    const xtermTextarea = containerRef.value.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null
-
-    const handlePaste = (e: ClipboardEvent) => {
-      e.preventDefault()
-      const text = e.clipboardData?.getData('text/plain')
-      if (text && paneId.value) {
-        store.sendInput(paneId.value, new TextEncoder().encode(text))
-      }
-    }
-
-    // Attach to both container and xterm's textarea for reliability
-    containerRef.value.addEventListener('paste', handlePaste)
-    if (xtermTextarea) {
-      xtermTextarea.addEventListener('paste', handlePaste)
-    }
-
-    // Store for cleanup
-    pasteCleanupFn = () => {
-      containerRef.value?.removeEventListener('paste', handlePaste)
-      xtermTextarea?.removeEventListener('paste', handlePaste)
-    }
 
     // Right-click paste (not built into xterm.js)
     contextMenuHandler = async (e: MouseEvent) => {
@@ -182,7 +164,6 @@ export function useTerminal(
 
   function dispose() {
     resizeObserver?.disconnect()
-    pasteCleanupFn?.()
     if (containerRef.value && contextMenuHandler) {
       containerRef.value.removeEventListener('contextmenu', contextMenuHandler as EventListener)
     }
