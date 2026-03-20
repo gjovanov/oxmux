@@ -674,13 +674,17 @@ fn is_valid_pane_id(pane: &str) -> bool {
 }
 
 /// Send input to a tmux pane via send-keys -H.
+/// Each hex byte must be a separate argument: `tmux send-keys -H 1b 5b 41`
 fn send_tmux_input(pane: &str, data: &[u8]) {
     if data.is_empty() || !is_valid_pane_id(pane) { return; }
-    let hex: String = data.iter().map(|b| format!("{:02x} ", b)).collect();
     let socket = find_tmux_socket();
     let mut cmd = std::process::Command::new("tmux");
     if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-    cmd.args(["send-keys", "-t", pane, "-H", hex.trim()]);
+    cmd.args(["send-keys", "-t", pane, "-H"]);
+    // Each hex byte as a separate argument (tmux -H requires this)
+    for byte in data {
+        cmd.arg(format!("{:02x}", byte));
+    }
     let _ = cmd.output();
 }
 
