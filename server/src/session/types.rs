@@ -281,3 +281,252 @@ pub struct UpdateSessionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ssh_auth_password_serde_roundtrip() {
+        let auth = SshAuthConfig::Password {
+            password: SecretString::new("my_secret_pass".to_string().into()),
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(json.contains("my_secret_pass"), "password should be serialized for DB");
+        assert!(json.contains("\"method\":\"password\""));
+
+        let deserialized: SshAuthConfig = serde_json::from_str(&json).unwrap();
+        match &deserialized {
+            SshAuthConfig::Password { password } => {
+                assert_eq!(password.expose_secret(), "my_secret_pass");
+            }
+            _ => panic!("expected Password variant"),
+        }
+    }
+
+    #[test]
+    fn test_ssh_auth_private_key_serde_roundtrip() {
+        let auth = SshAuthConfig::PrivateKey {
+            path: "~/.ssh/id_ed25519".to_string(),
+            passphrase: Some(SecretString::new("key_pass".to_string().into())),
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(json.contains("key_pass"));
+        assert!(json.contains("~/.ssh/id_ed25519"));
+
+        let deserialized: SshAuthConfig = serde_json::from_str(&json).unwrap();
+        match &deserialized {
+            SshAuthConfig::PrivateKey { path, passphrase } => {
+                assert_eq!(path, "~/.ssh/id_ed25519");
+                assert_eq!(passphrase.as_ref().unwrap().expose_secret(), "key_pass");
+            }
+            _ => panic!("expected PrivateKey variant"),
+        }
+    }
+
+    #[test]
+    fn test_ssh_auth_private_key_no_passphrase() {
+        let auth = SshAuthConfig::PrivateKey {
+            path: "/root/.ssh/id_rsa".to_string(),
+            passphrase: None,
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        let deserialized: SshAuthConfig = serde_json::from_str(&json).unwrap();
+        match &deserialized {
+            SshAuthConfig::PrivateKey { passphrase, .. } => {
+                assert!(passphrase.is_none());
+            }
+            _ => panic!("expected PrivateKey variant"),
+        }
+    }
+
+    #[test]
+    fn test_ssh_auth_uploaded_key_serde() {
+        let auth = SshAuthConfig::UploadedKey {
+            key_id: "abc-123".to_string(),
+            passphrase: Some(SecretString::new("upload_pass".to_string().into())),
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(json.contains("abc-123"));
+        assert!(json.contains("\"method\":\"uploaded_key\""));
+
+        let deserialized: SshAuthConfig = serde_json::from_str(&json).unwrap();
+        match &deserialized {
+            SshAuthConfig::UploadedKey { key_id, passphrase } => {
+                assert_eq!(key_id, "abc-123");
+                assert_eq!(passphrase.as_ref().unwrap().expose_secret(), "upload_pass");
+            }
+            _ => panic!("expected UploadedKey variant"),
+        }
+    }
+
+    #[test]
+    fn test_ssh_auth_agent_serde() {
+        let auth = SshAuthConfig::Agent;
+        let json = serde_json::to_string(&auth).unwrap();
+        assert_eq!(json, r#"{"method":"agent"}"#);
+        let deserialized: SshAuthConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, SshAuthConfig::Agent));
+    }
+
+    #[test]
+    fn test_ssh_auth_clone() {
+        let auth = SshAuthConfig::Password {
+            password: SecretString::new("clone_test".to_string().into()),
+        };
+        let cloned = auth.clone();
+        match &cloned {
+            SshAuthConfig::Password { password } => {
+                assert_eq!(password.expose_secret(), "clone_test");
+            }
+            _ => panic!("clone should preserve variant"),
+        }
+    }
+
+    #[test]
+    fn test_ssh_auth_debug_redacts_password() {
+        let auth = SshAuthConfig::Password {
+            password: SecretString::new("super_secret".to_string().into()),
+        };
+        let debug_str = format!("{:?}", auth);
+        assert!(!debug_str.contains("super_secret"), "Debug should redact password");
+        assert!(debug_str.contains("***"), "Debug should show redacted marker");
+    }
+
+    #[test]
+    fn test_sanitized_redacts_password() {
+        let session = ManagedSession {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            transport: TransportConfig {
+                browser: BrowserTransport::Websocket,
+                backend: BackendTransport::Ssh {
+                    host: "1.2.3.4".to_string(),
+                    port: 22,
+                    user: "root".to_string(),
+                    auth: SshAuthConfig::Password {
+                        password: SecretString::new("real_password".to_string().into()),
+                    },
+                },
+            },
+            status: SessionStatus::Created,
+            error: None,
+            tmux_sessions: vec![],
+        };
+
+        let sanitized = session.sanitized();
+        match &sanitized.transport.backend {
+            BackendTransport::Ssh { auth, .. } => match auth {
+                SshAuthConfig::Password { password } => {
+                    assert_eq!(password.expose_secret(), "***");
+                }
+                _ => panic!("expected Password variant"),
+            },
+            _ => panic!("expected Ssh backend"),
+        }
+    }
+
+    #[test]
+    fn test_sanitized_strips_passphrase() {
+        let session = ManagedSession {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            transport: TransportConfig {
+                browser: BrowserTransport::Websocket,
+                backend: BackendTransport::Ssh {
+                    host: "1.2.3.4".to_string(),
+                    port: 22,
+                    user: "root".to_string(),
+                    auth: SshAuthConfig::PrivateKey {
+                        path: "/key".to_string(),
+                        passphrase: Some(SecretString::new("secret_pp".to_string().into())),
+                    },
+                },
+            },
+            status: SessionStatus::Created,
+            error: None,
+            tmux_sessions: vec![],
+        };
+
+        let sanitized = session.sanitized();
+        match &sanitized.transport.backend {
+            BackendTransport::Ssh { auth, .. } => match auth {
+                SshAuthConfig::PrivateKey { passphrase, .. } => {
+                    assert!(passphrase.is_none(), "passphrase should be stripped");
+                }
+                _ => panic!("expected PrivateKey variant"),
+            },
+            _ => panic!("expected Ssh backend"),
+        }
+    }
+
+    #[test]
+    fn test_sanitized_uploaded_key_strips_passphrase() {
+        let session = ManagedSession {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            transport: TransportConfig {
+                browser: BrowserTransport::Websocket,
+                backend: BackendTransport::Ssh {
+                    host: "1.2.3.4".to_string(),
+                    port: 22,
+                    user: "root".to_string(),
+                    auth: SshAuthConfig::UploadedKey {
+                        key_id: "uuid-123".to_string(),
+                        passphrase: Some(SecretString::new("secret".to_string().into())),
+                    },
+                },
+            },
+            status: SessionStatus::Created,
+            error: None,
+            tmux_sessions: vec![],
+        };
+
+        let sanitized = session.sanitized();
+        match &sanitized.transport.backend {
+            BackendTransport::Ssh { auth, .. } => match auth {
+                SshAuthConfig::UploadedKey { key_id, passphrase } => {
+                    assert_eq!(key_id, "uuid-123", "key_id should be preserved");
+                    assert!(passphrase.is_none(), "passphrase should be stripped");
+                }
+                _ => panic!("expected UploadedKey variant"),
+            },
+            _ => panic!("expected Ssh backend"),
+        }
+    }
+
+    #[test]
+    fn test_transport_config_with_uploaded_key_full_roundtrip() {
+        let config = TransportConfig {
+            browser: BrowserTransport::Websocket,
+            backend: BackendTransport::Ssh {
+                host: "10.0.0.1".to_string(),
+                port: 22,
+                user: "deploy".to_string(),
+                auth: SshAuthConfig::UploadedKey {
+                    key_id: "key-uuid-456".to_string(),
+                    passphrase: None,
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("uploaded_key"));
+        assert!(json.contains("key-uuid-456"));
+
+        let deserialized: TransportConfig = serde_json::from_str(&json).unwrap();
+        match &deserialized.backend {
+            BackendTransport::Ssh { host, user, auth, .. } => {
+                assert_eq!(host, "10.0.0.1");
+                assert_eq!(user, "deploy");
+                match auth {
+                    SshAuthConfig::UploadedKey { key_id, .. } => {
+                        assert_eq!(key_id, "key-uuid-456");
+                    }
+                    _ => panic!("expected UploadedKey"),
+                }
+            }
+            _ => panic!("expected Ssh backend"),
+        }
+    }
+}

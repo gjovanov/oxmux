@@ -22,10 +22,12 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    command: 'docker compose up',
-    url: 'http://localhost:8080/health',
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-  },
+  ...(!process.env.BASE_URL ? {
+    webServer: {
+      command: 'docker compose up',
+      url: 'http://localhost:8080/health',
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+  } : {}),
 })

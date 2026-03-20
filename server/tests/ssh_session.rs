@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
+use secrecy::SecretString;
+
 use oxmux_server::session::ssh_transport::SshTransport;
 use oxmux_server::session::transport::Transport;
 use oxmux_server::session::types::SshAuthConfig;
@@ -30,6 +32,11 @@ fn shared_pane_outputs() -> Arc<DashMap<String, broadcast::Sender<Bytes>>> {
     Arc::new(DashMap::new())
 }
 
+/// Create an empty ephemeral key store.
+fn empty_ephemeral_keys() -> Arc<DashMap<String, (SecretString, Option<SecretString>)>> {
+    Arc::new(DashMap::new())
+}
+
 /// Build an SshTransport configured for the mars server.
 fn build_transport(
     session_name: &str,
@@ -45,6 +52,7 @@ fn build_transport(
         },
         session_name.to_string(),
         pane_outputs,
+        empty_ephemeral_keys(),
     )
 }
 
