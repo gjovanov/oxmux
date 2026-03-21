@@ -125,6 +125,14 @@ impl TmuxManager {
     }
 
     pub fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> Result<()> {
+        // Resize the WINDOW first (pane can't exceed window dimensions)
+        // Then resize the pane within the window
+        Self::tmux_cmd()
+            .args(["resize-window", "-t", pane_id, "-x", &cols.to_string(), "-y", &rows.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to run tmux resize-window")?;
         Self::tmux_cmd()
             .args(["resize-pane", "-t", pane_id, "-x", &cols.to_string(), "-y", &rows.to_string()])
             .stdout(Stdio::null())

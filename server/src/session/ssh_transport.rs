@@ -332,10 +332,14 @@ impl Transport for SshTransport {
 
         info!(addr = %addr, "SSH authenticated, setting up tmux");
 
-        // 1. Ensure tmux session exists
+        // 1. Ensure tmux session exists + set window-size manual
+        // window-size=manual disables auto-sizing from attached clients,
+        // allowing resize-pane to work independently of control mode PTY size
         let create_cmd = format!(
-            "tmux has-session -t {} 2>/dev/null || tmux new-session -d -s {} -x 80 -y 24",
-            self.session_name, self.session_name
+            "tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -x 200 -y 50; \
+             tmux set-option -g window-size manual 2>/dev/null; \
+             tmux set-option -g aggressive-resize on 2>/dev/null",
+            name = self.session_name
         );
         Self::exec_command(&handle, &create_cmd).await?;
 
@@ -358,9 +362,11 @@ impl Transport for SshTransport {
         let channel_id = ctrl_channel.id();
         *self.control_channel_id.lock().await = Some(channel_id);
 
-        // Request PTY for proper terminal handling
+        // Request PTY with large size for control mode
+        // With window-size=manual, the PTY size doesn't limit pane sizes
+        // but a large default prevents tmux from auto-shrinking windows
         ctrl_channel
-            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .request_pty(false, "xterm-256color", 300, 100, 0, 0, &[])
             .await
             .context("failed to request PTY")?;
 
@@ -484,9 +490,12 @@ impl Transport for SshTransport {
     }
 
     async fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> Result<()> {
-        info!(pane = %pane_id, cols, rows, "resizing pane");
-        let cmd = format!("resize-pane -t {} -x {} -y {}", pane_id, cols, rows);
-        self.write_control_command(&cmd).await
+        info!(pane = %pane_id, cols, rows, "resizing window+pane");
+        // Resize window first (pane can't exceed window dimensions)
+        let win_cmd = format!("resize-window -t {} -x {} -y {}", pane_id, cols, rows);
+        self.write_control_command(&win_cmd).await?;
+        let pane_cmd = format!("resize-pane -t {} -x {} -y {}", pane_id, cols, rows);
+        self.write_control_command(&pane_cmd).await
     }
 
     async fn run_tmux_command(&self, cmd: &str) -> Result<String> {
