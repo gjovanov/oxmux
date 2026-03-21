@@ -379,7 +379,18 @@ impl Transport for SshTransport {
 
         info!(addr = %addr, session = %self.session_name, "control mode channel opened");
 
-        // 4. Spawn background task: read control mode output, parse, broadcast
+        // 4. Abort any existing reader task before spawning a new one
+        // (prevents duplicate output from multiple control mode attachments)
+        if let Some(old_task) = self.reader_task.take() {
+            info!(session = %self.session_name, "aborting old reader task");
+            old_task.abort();
+        }
+        // Also close old SSH handle if any
+        if let Some(old_handle) = self.ssh_handle.lock().await.take() {
+            let _ = old_handle.disconnect(russh::Disconnect::ByApplication, "reconnecting", "").await;
+        }
+
+        // Spawn background task: read control mode output, parse, broadcast
         let shared_outputs = self.shared_pane_outputs.clone();
         let tmux_state = self.tmux_state.clone();
         let session_name = self.session_name.clone();
