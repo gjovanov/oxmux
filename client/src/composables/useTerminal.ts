@@ -188,11 +188,6 @@ export function useTerminal(
     containerRef.value.addEventListener('contextmenu', ctxHandler)
     cleanupFns.push(() => containerRef.value?.removeEventListener('contextmenu', ctxHandler as EventListener))
 
-    // Fit
-    requestAnimationFrame(() => {
-      fitAddon.fit()
-    })
-
     // I/O — only ONE handler per terminal, stored in registry
     t.onData((data: string) => {
       store.sendInput(pid, new TextEncoder().encode(data))
@@ -202,11 +197,16 @@ export function useTerminal(
       store.sendInput(pid, Uint8Array.from(data, c => c.charCodeAt(0)))
     })
 
+    // CRITICAL ORDER: fit → resize → subscribe
+    // Resize MUST arrive at server/agent BEFORE subscribe triggers capture-pane.
+    // Otherwise capture-pane captures at the old (wrong) pane size.
+    fitAddon.fit()
+    store.sendResize(pid, t.cols, t.rows)
     store.subscribePane(pid, (data: Uint8Array) => {
       t.write(data)
     })
 
-    // Resize observer
+    // Resize observer for subsequent size changes
     let resizeTimer: ReturnType<typeof setTimeout>
     const resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimer)
@@ -217,10 +217,11 @@ export function useTerminal(
     })
     resizeObserver.observe(containerRef.value)
 
-    setTimeout(() => {
+    // Second fit after layout settles (container might not have final dimensions yet)
+    requestAnimationFrame(() => {
       fitAddon.fit()
       store.sendResize(pid, t.cols, t.rows)
-    }, 100)
+    })
 
     t.write('\r\n\x1b[90m[oxmux] connecting to pane ' + pid + '...\x1b[0m\r\n')
 

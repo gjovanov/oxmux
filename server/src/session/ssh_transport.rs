@@ -336,7 +336,7 @@ impl Transport for SshTransport {
         // window-size=manual disables auto-sizing from attached clients,
         // allowing resize-pane to work independently of control mode PTY size
         let create_cmd = format!(
-            "tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -x 200 -y 50; \
+            "tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -x 80 -y 24; \
              tmux set-option -g window-size manual 2>/dev/null; \
              tmux set-option -g aggressive-resize on 2>/dev/null",
             name = self.session_name
@@ -362,11 +362,11 @@ impl Transport for SshTransport {
         let channel_id = ctrl_channel.id();
         *self.control_channel_id.lock().await = Some(channel_id);
 
-        // Request PTY with large size for control mode
-        // With window-size=manual, the PTY size doesn't limit pane sizes
-        // but a large default prevents tmux from auto-shrinking windows
+        // Request PTY at standard 80x24 for control mode.
+        // With window-size=manual, the PTY size doesn't constrain panes —
+        // resize-window commands set the actual size independently.
         ctrl_channel
-            .request_pty(false, "xterm-256color", 300, 100, 0, 0, &[])
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
             .await
             .context("failed to request PTY")?;
 
