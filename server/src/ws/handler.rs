@@ -111,6 +111,19 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
             _ = interval.tick() => {}
         }
     }
+
+    // Cleanup: disconnect all connected sessions for this user
+    // This closes SSH channels, stops control mode readers, and frees tmux resources
+    info!(user_id = %user_id, "cleaning up sessions after WS disconnect");
+    if let Ok(sessions) = state.session_manager.load_user_sessions(&user_id).await {
+        for session in &sessions {
+            if session.status == crate::session::types::SessionStatus::Connected {
+                if let Err(e) = state.session_manager.disconnect(&session.id).await {
+                    warn!(session_id = %session.id, error = %e, "failed to disconnect session on WS close");
+                }
+            }
+        }
+    }
 }
 
 /// REST endpoint: GET /api/ice-config?user=<id>

@@ -46,13 +46,26 @@ export async function connectWebRtc(
 
     dc.onopen = () => {
       console.log('[oxmux-webrtc] DataChannel opened')
+      dc.bufferedAmountLowThreshold = 65536 // 64KB
       dataChannel = dc
       resolve({
-        send: (msg) => { if (dc.readyState === 'open') dc.send(encode(msg)) },
+        send: (msg) => {
+          if (dc.readyState !== 'open') return
+          // Backpressure: skip if buffer is full (prevents SCTP overflow)
+          if (dc.bufferedAmount > 1024 * 1024) {
+            console.warn('[oxmux-webrtc] DC buffer full, dropping message')
+            return
+          }
+          dc.send(encode(msg))
+        },
         close: () => { dc.close(); pc.close() },
         onMessage: (h) => { messageHandler = h },
         onClose: (h) => { closeHandler = h },
       })
+    }
+
+    dc.onerror = (ev) => {
+      console.error('[oxmux-webrtc] DataChannel error:', ev)
     }
 
     dc.onmessage = (ev: MessageEvent) => {

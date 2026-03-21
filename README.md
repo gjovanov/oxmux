@@ -47,13 +47,15 @@ All transports carry the same binary MessagePack protocol. The SSH/tmux layer is
 
 | Category | Feature |
 |----------|---------|
-| **Terminal** | Full xterm.js rendering, tmux session/window/pane tree, resize propagation |
-| **Transport** | WebSocket, QUIC (WebTransport), WebRTC DataChannel, COTURN integration |
-| **SSH** | Multi-host connections, private key + password + agent auth, auto-reconnect |
+| **Terminal** | Full xterm.js rendering, Ctrl+V paste, arrow keys, tmux session/window/pane tree |
+| **Mashed View** | NxN grid (2x2 to 5x5) of terminals from multiple sessions simultaneously |
+| **Transport** | WebSocket, QUIC (WebTransport), WebRTC DataChannel, COTURN, auto-fallback chain |
+| **SSH** | Multi-host connections, private key + password + uploaded key auth, auto-reconnect |
 | **Claude Code** | stream-json parser, structured conversation UI, tool use blocks, cost meter |
-| **Fleet** | Multi-session dashboard, aggregate cost tracking, process auto-detection |
+| **Fleet** | Multi-session dashboard, per-session P2P, aggregate cost tracking |
 | **Auth** | JWT tokens, user isolation, session persistence (SQLite) |
-| **Agent** | Auto-deploy via SSH, QUIC P2P, WebRTC P2P, self-update |
+| **Agent** | One-click deploy via SSH, QUIC P2P, WebRTC P2P, per-host DNS (*.oxmux.app) |
+| **UI** | Resizable sidebar, view toggle (single/mashed), Catppuccin theme |
 
 ## Tech Stack
 

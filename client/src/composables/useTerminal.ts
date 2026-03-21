@@ -49,6 +49,14 @@ function disposeEntry(paneId: string) {
   terminalRegistry.delete(paneId)
 }
 
+/** Reset a terminal's parser state (e.g., after transport switch to clear partial UTF-8) */
+export function resetTerminal(paneId: string) {
+  const entry = terminalRegistry.get(paneId)
+  if (entry) {
+    entry.terminal.write('\x1b[2J\x1b[H') // clear screen + cursor home
+  }
+}
+
 /** Dispose all terminals (e.g., on logout) */
 export function disposeAllTerminals() {
   for (const paneId of [...terminalRegistry.keys()]) {

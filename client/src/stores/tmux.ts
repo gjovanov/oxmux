@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { decode, encode } from '@msgpack/msgpack'
 import { qualifyPaneId, parseQualifiedPaneId, type QualifiedPaneId } from '@/utils/paneId'
+import { resetTerminal } from '@/composables/useTerminal'
 
 export interface TmuxPaneInfo {
   id: string
@@ -418,6 +419,8 @@ export const useTmuxStore = defineStore('tmux', () => {
       if (sid === sessionId) {
         console.log(`[oxmux] re-subscribing pane ${paneId} via WS`)
         wsSend({ t: 'sub', pane: paneId })
+        // Reset terminal to clear any partial UTF-8 from the old transport
+        resetTerminal(qid)
       }
     }
   }

@@ -8,344 +8,240 @@ Oxmux provides 5 transport paths for connecting a browser terminal to a remote t
 graph TB
     subgraph Browser["Browser (Vue 3 + xterm.js)"]
         UI[Terminal UI]
-        WS_C[WebSocket Client]
-        QUIC_C[WebTransport Client]
-        WEBRTC_C[RTCPeerConnection]
+        WS_C[WebSocket]
+        QUIC_C[WebTransport]
+        WebRTC_C[WebRTC DC]
     end
 
-    subgraph Server["oxmux-server (Rust + Axum)"]
-        WS_S[WS Handler]
-        QUIC_S[QUIC Listener]
-        WEBRTC_S[WebRTC Listener]
+    subgraph Server["Oxmux Server (K8s)"]
+        WS_H[WS Handler]
         SM[Session Manager]
-        SSH[SSH Transport<br/>russh]
+        SSH_T[SSH Transport]
         DB[(SQLite)]
-    end
-
-    subgraph Agent["oxmux-agent (Rust)"]
-        QUIC_A[QUIC Listener]
-        WEBRTC_A[WebRTC Listener]
-        PTY_A[tmux Manager]
+        AR[Agent Registry]
     end
 
     subgraph Host["Remote Host"]
+        Agent[oxmux-agent]
         TMUX[tmux]
-        CLAUDE[Claude Code]
+        Shell[bash / claude]
     end
 
-    %% Transport 1: WS → SSH
-    UI --> WS_C
-    WS_C -->|"1. WebSocket"| WS_S
-    WS_S --> SM
-    SM --> SSH
-    SSH -->|SSH| TMUX
+    subgraph COTURN["COTURN Relay"]
+        TURN[TURN/TURNS]
+    end
 
-    %% Transport 2: QUIC → SSH
-    QUIC_C -->|"2. QUIC"| QUIC_S
-    QUIC_S --> SM
+    UI --> WS_C --> WS_H
+    UI --> QUIC_C --> Agent
+    UI --> WebRTC_C --> Agent
 
-    %% Transport 3: WebRTC → SSH
-    WEBRTC_C -->|"3. WebRTC"| WEBRTC_S
-    WEBRTC_S --> SM
-
-    %% Transport 4: QUIC → Agent P2P
-    QUIC_C -.->|"4. QUIC P2P"| QUIC_A
-    QUIC_A --> PTY_A
-    PTY_A --> TMUX
-
-    %% Transport 5: WebRTC → Agent P2P
-    WEBRTC_C -.->|"5. WebRTC P2P"| WEBRTC_A
-    WEBRTC_A --> PTY_A
-
+    WS_H --> SM --> SSH_T -->|SSH| TMUX
     SM --> DB
-    TMUX --> CLAUDE
+    SM --> AR
 
-    style Browser fill:#1e1e2e,color:#cdd6f4,stroke:#89b4fa
-    style Server fill:#181825,color:#cdd6f4,stroke:#a6e3a1
-    style Agent fill:#181825,color:#cdd6f4,stroke:#cba6f7
-    style Host fill:#11111b,color:#cdd6f4,stroke:#f9e2af
+    Agent -->|tmux -CC| TMUX
+    TMUX --> Shell
+
+    WebRTC_C -.->|ICE| TURN
 ```
 
-## Transport Comparison
+## Dual-Transport Model
 
-| # | Name | Data Path | Latency | Requires | Use Case |
-|---|------|-----------|---------|----------|----------|
-| 1 | WS → SSH | Browser → Server → Host | High | Nothing extra | Default, always works |
-| 2 | QUIC → SSH | Browser → Server → Host | Medium | QUIC port on server | Mobile, lossy networks |
-| 3 | WebRTC → SSH | Browser → Server → Host | Medium | TURN/STUN | NAT traversal to server |
-| 4 | QUIC → Agent | Browser → Agent direct | Low | Agent on host | Best performance |
-| 5 | WebRTC → Agent | Browser → Agent direct | Low | Agent + TURN | P2P through any NAT |
+The browser maintains TWO transport layers simultaneously:
 
-## Session Lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> Created: create session
-    Created --> Connecting: connect
-    Connecting --> Connected: transport established
-    Connecting --> Error: connection failed
-    Connected --> Disconnected: disconnect / network loss
-    Connected --> Error: transport error
-    Disconnected --> Connecting: reconnect
-    Error --> Connecting: retry
-    Error --> [*]: delete
-    Disconnected --> [*]: delete
-    Created --> [*]: delete
-
-    state Connected {
-        [*] --> Streaming
-        Streaming --> Resizing: terminal resize
-        Resizing --> Streaming: resize applied
-    }
-```
-
-## Transport 1: WebSocket → SSH
-
-The default transport. Browser connects via WSS, server SSHes to the remote host.
+| Layer | Transport | Purpose | Always Active |
+|-------|-----------|---------|---------------|
+| **Control Plane** | WebSocket | Session CRUD, agent management, transport upgrades | Yes |
+| **Data Plane** | QUIC P2P or WebRTC P2P | Pane I/O (input, output, resize, subscribe) | Only when P2P active |
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant S as oxmux-server
-    participant H as Remote Host
+    participant WS as WS (Control)
+    participant P2P as P2P (Data)
+    participant S as Server
+    participant A as Agent
 
-    B->>S: WSS upgrade (?token=jwt)
-    S->>S: Validate JWT
-    S-->>B: WS connected
+    B->>WS: sess_connect, agent_install
+    S-->>WS: sess_connected, agent_status
 
-    B->>S: CreateSession {name, ssh_config}
-    S->>S: Store in SQLite
-    S-->>B: SessionCreated
+    Note over B,A: P2P Upgrade
+    B->>WS: transport_upgrade
+    S-->>WS: transport_upgrade_ready
+    B->>P2P: WebRTC/QUIC connect to Agent
 
-    B->>S: ConnectSession {id}
-    S->>H: SSH connect (russh)
-    S->>H: SSH auth (key/password)
-    S->>H: exec: tmux new-session -d -s <name>
-    S->>H: exec: tmux list-panes (query state)
-    S->>H: exec: tmux -CC attach (control mode)
-    S-->>B: SessionConnected {tmux_sessions}
+    Note over B,A: Dual-transport active
+    B->>P2P: sub, i, r (data)
+    A-->>P2P: o (output)
+    B->>WS: sess_refresh (control)
 
-    B->>S: Subscribe {pane: "%0"}
-    Note over S,H: Control mode streams %output events
-
-    loop PTY I/O
-        H-->>S: %output %0 <data>
-        S->>S: ControlModeParser → broadcast
-        S-->>B: Output {pane: "%0", data}
-        B->>B: xterm.js write(data)
-
-        B->>S: Input {pane: "%0", data}
-        S->>H: send-keys -t %0 -H <hex>
-    end
+    Note over B,A: P2P drops → auto SSH fallback
+    P2P--xB: closed
+    B->>WS: sub (re-subscribe via SSH)
 ```
 
-## Transport 2: QUIC → SSH
+## WebRTC P2P Flow (Browser-as-Offerer)
 
-Browser uses WebTransport API for QUIC connection to server. Server SSHes to host.
+Browser creates the offer (with DataChannel), agent creates the answer. This pattern ensures Chrome generates ICE candidates.
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant S as oxmux-server
-    participant H as Remote Host
+    participant Q as QUIC Signaling
+    participant A as Agent
 
-    B->>S: QUIC connect (WebTransport)
-    B->>S: Stream 0: Auth {token: jwt}
-    S->>S: Validate JWT
-    S-->>B: AuthOk
+    B->>Q: WebTransport connect + auth
+    B->>Q: sess_connect (session name)
+    A-->>Q: sess_connected
 
-    B->>S: Stream 0: ConnectSession {id}
-    S->>H: SSH connect + tmux -CC attach
-    S-->>B: SessionConnected
+    B->>B: pc = new RTCPeerConnection()
+    B->>B: dc = pc.createDataChannel('oxmux')
+    B->>B: offer = pc.createOffer()
+    B->>B: pc.setLocalDescription(offer)
 
-    loop PTY I/O (multiplexed streams)
-        H-->>S: %output %0 <data>
-        S-->>B: Stream 1: Output {pane, data}
-        B->>S: Stream 1: Input {pane, data}
-        S->>H: send-keys -H <hex>
+    B->>Q: webrtc_offer (SDP)
+
+    loop Trickle ICE
+        B->>Q: webrtc_ice (candidate)
     end
+
+    A->>A: pc.setRemoteDescription(offer)
+    A->>A: answer = pc.createAnswer()
+    A->>A: Wait for ICE gathering complete
+    A-->>Q: webrtc_answer (SDP + all candidates)
+
+    B->>B: pc.setRemoteDescription(answer)
+    B-->>B: ICE connected
+    B-->>B: DataChannel opened
+
+    Note over B,A: Terminal I/O via DataChannel
+    B->>A: {t:'i', pane:'%0', data:[bytes]}
+    A-->>B: {t:'o', pane:'%0', data:[bytes]}
 ```
 
-## Transport 4: QUIC → Agent (P2P)
+## Multi-Session Architecture
 
-Browser connects directly to oxmux-agent via QUIC. No server in data path.
+### Qualified Pane IDs
 
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant S as oxmux-server
-    participant A as oxmux-agent
+tmux pane IDs (`%0`, `%1`) are only unique per tmux server. Multiple sessions on different hosts share the same IDs. Qualified pane IDs scope them globally:
 
-    Note over A,S: Agent registered via QUIC heartbeat
-
-    B->>S: ListAgents
-    S-->>B: [{agent_id, host, quic_port}]
-
-    B->>S: RequestAgentToken {agent_id}
-    S-->>B: {token: short-lived-jwt}
-
-    B->>A: QUIC connect (WebTransport)
-    B->>A: Auth {token}
-    A->>A: Verify JWT (shared secret with server)
-    A-->>B: AuthOk
-
-    B->>A: ConnectSession {name}
-    A->>A: tmux new-session / attach
-    A-->>B: SessionConnected {tmux_sessions}
-
-    loop PTY I/O (direct P2P)
-        A-->>B: Output {pane, data}
-        B->>A: Input {pane, data}
-    end
+```
+{managedSessionId}::{tmuxPaneId}
+e.g., "abc-123::%0"
 ```
 
-## Transport 5: WebRTC → Agent (P2P)
+### Per-Session P2P
 
-Browser connects directly to agent via WebRTC DataChannel. Server only relays signaling.
-
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant S as oxmux-server
-    participant T as TURN Server
-    participant A as oxmux-agent
-
-    B->>S: RequestIceConfig
-    S-->>B: {iceServers: [{urls, credential}]}
-
-    B->>B: Create RTCPeerConnection
-    B->>S: Signal {type: offer, sdp, to: agent_id}
-    S->>A: Relay offer
-    A->>A: Create RTCPeerConnection
-    A->>S: Signal {type: answer, sdp, to: browser_id}
-    S-->>B: Relay answer
-
-    loop ICE
-        B->>S: Signal {type: ice_candidate}
-        S->>A: Relay candidate
-        A->>S: Signal {type: ice_candidate}
-        S-->>B: Relay candidate
-    end
-
-    Note over B,A: DataChannel established (P2P or via TURN)
-
-    B->>A: DataChannel: ConnectSession {name}
-    A-->>B: DataChannel: SessionConnected
-
-    loop PTY I/O (direct P2P)
-        A-->>B: DataChannel: Output {pane, data}
-        B->>A: DataChannel: Input {pane, data}
-    end
-```
-
-## Module Structure
+Each connected session can have its own independent P2P connection:
 
 ```mermaid
 graph LR
-    subgraph Server
-        main[main.rs]
-        auth[auth/]
-        db[db/]
-        ws[ws/]
-        session[session/]
-        transport[transport/]
-        tmux[tmux/]
-        claude[claude/]
-        webrtc[webrtc/]
-        quic[quic/]
-        pty[pty/]
+    subgraph Store
+        ST[sessionTrees<br/>Map‹sid, trees›]
+        P2P[p2pConnections<br/>Map‹sid, conn›]
+        PH[paneHandlers<br/>Map‹qid, handler›]
     end
 
-    main --> auth
-    main --> ws
-    main --> quic
-    ws --> session
-    quic --> session
-    session --> transport
-    transport --> tmux
-    transport --> claude
-    transport --> pty
-    session --> db
-    auth --> db
-    ws --> webrtc
+    subgraph "Session A (mars)"
+        A_P2P[WebRTC P2P]
+        A_TMUX[tmux %0, %1]
+    end
 
-    style auth fill:#e65100,color:white
-    style ws fill:#1976d2,color:white
-    style quic fill:#7b1fa2,color:white
-    style session fill:#ff9800,color:white
-    style transport fill:#2e7d32,color:white
-    style tmux fill:#455a64,color:white
-    style claude fill:#0097a7,color:white
-    style db fill:#78909c,color:white
+    subgraph "Session B (zeus)"
+        B_P2P[QUIC P2P]
+        B_TMUX[tmux %0, %1]
+    end
+
+    P2P -->|sid_a| A_P2P --> A_TMUX
+    P2P -->|sid_b| B_P2P --> B_TMUX
 ```
 
-## Database Schema
+### Mashed View (NxN Grid)
 
 ```mermaid
-erDiagram
-    users {
-        text id PK
-        text username UK
-        text password_hash
-        text created_at
-        text updated_at
-    }
+graph TB
+    subgraph "MashedView (2x2)"
+        C1["MashedCell<br/>mars %0 (bash)<br/>WebRTC P2P"]
+        C2["MashedCell<br/>mars %1 (claude)<br/>WebRTC P2P"]
+        C3["MashedCell<br/>zeus %0 (bash)<br/>QUIC P2P"]
+        C4["Empty Cell<br/>+ Add pane"]
+    end
 
-    sessions {
-        text id PK
-        text user_id FK
-        text name
-        text transport_config "JSON"
-        text status
-        text error
-        text created_at
-        text updated_at
-    }
+    subgraph "Terminal Registry"
+        TR[Global Map‹paneId, Terminal›<br/>Survives view switches]
+    end
 
-    users ||--o{ sessions : "owns"
+    C1 & C2 & C3 --> TR
 ```
 
-## Agent Deployment Flow
+## Terminal Registry
+
+Prevents duplicate event handlers when switching between single and mashed views:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: component mounts
+    Created --> Attached: xterm.open(container)
+    Attached --> Reattached: view switch (reuse DOM)
+    Reattached --> Attached: refit + resize
+    Attached --> GracePeriod: component unmounts
+    GracePeriod --> Attached: remount within 500ms
+    GracePeriod --> Disposed: no remount → cleanup
+    Disposed --> [*]
+```
+
+## Agent Deployment
 
 ```mermaid
 sequenceDiagram
-    participant U as User (Browser)
-    participant S as oxmux-server
+    participant B as Browser
+    participant S as Server
     participant H as Remote Host
 
-    U->>S: InstallAgent {host, ssh_config}
+    B->>S: agent_install (session_id)
+    S-->>B: agent_status: installing
+
     S->>H: SSH connect
-    S->>H: scp oxmux-agent binary
-    S->>H: Create systemd unit
-    S->>H: systemctl enable --now oxmux-agent
-    S-->>U: AgentInstalling
+    S->>H: SCP oxmux-agent (musl static binary)
+    S->>H: Create systemd service
+    S->>H: systemctl start oxmux-agent
 
-    H->>S: QUIC connect (agent registration)
-    H->>S: Heartbeat {agent_id, version, capabilities}
-    S->>S: Register agent in memory
-    S-->>U: AgentOnline {agent_id, version}
+    loop Health Check (5x, 2s apart)
+        S->>H: systemctl is-active
+    end
 
-    Note over U,H: Browser can now use Transport 4 or 5
+    S->>S: Register in Agent Registry
+    S-->>B: agent_status: online
+
+    Note over B,H: Ready for P2P upgrade
+    B->>S: transport_upgrade (webrtc_p2p)
+    S-->>B: transport_upgrade_ready<br/>(agent-mars.oxmux.app:4433, JWT)
 ```
 
-## tmux Control Mode
+## Transport Fallback Chain
 
-The server uses `tmux -CC attach` (control mode) for both state management and PTY I/O streaming:
+```mermaid
+graph TD
+    A[WebRTC P2P] -->|DC close| B[QUIC P2P]
+    B -->|WebTransport error| C[WS → SSH]
+    C -->|WS reconnect| D[Auto-restore sessions]
 
-```
-┌─────────────────────────────────────────────┐
-│ SSH Channel (persistent)                     │
-│                                              │
-│ stdin  → tmux commands                       │
-│   send-keys -t %0 -H 1b 5b 41              │
-│   resize-pane -t %0 -x 120 -y 35           │
-│                                              │
-│ stdout ← control mode notifications         │
-│   %output %0 \033[1;32mhello\033[0m         │
-│   %session-changed $0 my-session            │
-│   %layout-change @0 ab12,120x35,0,0,0      │
-│   %window-add @1                            │
-└─────────────────────────────────────────────┘
+    style A fill:#fab387,color:#1e1e2e
+    style B fill:#cba6f7,color:#1e1e2e
+    style C fill:#89b4fa,color:#1e1e2e
+    style D fill:#a6e3a1,color:#1e1e2e
 ```
 
-Output bytes are octal-escaped by tmux. The `ControlModeParser` decodes them and broadcasts to per-pane `broadcast::channel`s. Each subscribed browser client receives the same bytes via their chosen transport.
+## tmux Integration
+
+### Control Mode
+- `tmux -CC attach -t <session>` via `script -q` for PTY allocation
+- `%output <pane_id> <data>` events parsed and broadcast per pane
+- `window-size latest` allows resize beyond control mode client's 80x24
+- `send-keys -H <hex bytes>` with each byte as separate argument
+
+### Pane Sizing
+- Browser: FitAddon calculates cols/rows from container dimensions
+- Client sends `{t:'r', pane:'%0', cols:130, rows:30}` on resize
+- Agent/server runs `tmux resize-pane -t %0 -x 130 -y 30`
+- `SIGWINCH` propagated to shell automatically by tmux
