@@ -383,8 +383,12 @@ async fn handle_message(
             let pane = get_str(&msg, "pane");
             let cols = get_u64(&msg, "cols") as u16;
             let rows = get_u64(&msg, "rows") as u16;
-            if !pane.is_empty() && cols > 0 && rows > 0 {
-                let _ = tmux_mgr.resize_pane(pane, cols, rows);
+            if is_valid_pane_id(pane) && cols > 0 && rows > 0 {
+                info!(pane = %pane, cols, rows, "resize pane");
+                match tmux_mgr.resize_pane(pane, cols, rows) {
+                    Ok(_) => {}
+                    Err(e) => warn!(pane = %pane, error = %e, "resize failed"),
+                }
             }
         }
 

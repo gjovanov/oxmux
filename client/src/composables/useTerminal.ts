@@ -97,11 +97,15 @@ export function useTerminal(
       })
       existing.resizeObserver.observe(containerRef.value)
 
-      // Fit to new container
+      // Fit to new container (double-fit: immediate + delayed for layout settling)
       requestAnimationFrame(() => {
         existing.fitAddon.fit()
         store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
       })
+      setTimeout(() => {
+        existing.fitAddon.fit()
+        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+      }, 200)
 
       term.value = existing.terminal
       return
