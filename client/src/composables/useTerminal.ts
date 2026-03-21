@@ -204,16 +204,20 @@ export function useTerminal(
       store.sendInput(pid, Uint8Array.from(data, c => c.charCodeAt(0)))
     })
 
-    // CRITICAL ORDER: fit → resize → subscribe
-    // Resize MUST arrive at server/agent BEFORE subscribe triggers capture-pane.
-    // Otherwise capture-pane captures at the old (wrong) pane size.
+    // CRITICAL ORDER: fit → resize → (wait for tmux) → subscribe
+    // The resize-window command needs time to propagate through tmux
+    // before the subscribe handler's SIGWINCH jiggle runs.
     fitAddon.fit()
     store.sendResize(pid, t.cols, t.rows)
-    store.subscribePane(pid, (data: Uint8Array) => {
-      t.write(data)
-    })
 
-    // Agent handles SIGWINCH jiggle on subscribe — no client-side jiggle needed.
+    // Delay subscribe by 200ms to let tmux process the resize first.
+    // The agent's sub handler does a SIGWINCH jiggle which only works
+    // if the pane is already at the correct size.
+    setTimeout(() => {
+      store.subscribePane(pid, (data: Uint8Array) => {
+        t.write(data)
+      })
+    }, 200)
 
     // Resize observer for subsequent size changes
     let resizeTimer: ReturnType<typeof setTimeout>
