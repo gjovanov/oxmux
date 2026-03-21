@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { decode, encode } from '@msgpack/msgpack'
 import { qualifyPaneId, parseQualifiedPaneId, type QualifiedPaneId } from '@/utils/paneId'
-import { resetTerminal } from '@/composables/useTerminal'
+import { resetTerminal, getTerminalSize } from '@/composables/useTerminal'
 
 export interface TmuxPaneInfo {
   id: string
@@ -398,7 +398,7 @@ export const useTmuxStore = defineStore('tmux', () => {
     resubscribeSessionPanes(sessionId)
   }
 
-  /** Re-subscribe panes belonging to a session via its P2P connection */
+  /** Re-subscribe panes belonging to a session via its P2P connection + sync terminal size */
   function resubscribeSessionPanes(sessionId: string) {
     const p2p = p2pConnections.get(sessionId)
     if (!p2p) return
@@ -407,11 +407,16 @@ export const useTmuxStore = defineStore('tmux', () => {
       const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
       if (sid === sessionId) {
         p2p.send({ t: 'sub', pane: paneId })
+        // Sync terminal size so agent's tmux pane matches xterm.js
+        const size = getTerminalSize(qid)
+        if (size && size.cols > 0 && size.rows > 0) {
+          p2p.send({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+        }
       }
     }
   }
 
-  /** Re-subscribe panes for a session via WS after P2P drops */
+  /** Re-subscribe panes for a session via WS after P2P drops + sync terminal size */
   function resubscribePanesViaWS(sessionId: string) {
     if (!wsSend) return
     for (const qid of paneHandlers.keys()) {
@@ -419,6 +424,11 @@ export const useTmuxStore = defineStore('tmux', () => {
       if (sid === sessionId) {
         console.log(`[oxmux] re-subscribing pane ${paneId} via WS`)
         wsSend({ t: 'sub', pane: paneId })
+        // Sync terminal size so SSH transport pane matches xterm.js
+        const size = getTerminalSize(qid)
+        if (size && size.cols > 0 && size.rows > 0) {
+          wsSend({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+        }
         // Reset terminal to clear any partial UTF-8 from the old transport
         resetTerminal(qid)
       }

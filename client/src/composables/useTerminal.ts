@@ -49,6 +49,13 @@ function disposeEntry(paneId: string) {
   terminalRegistry.delete(paneId)
 }
 
+/** Get current terminal dimensions for a pane */
+export function getTerminalSize(paneId: string): { cols: number; rows: number } | null {
+  const entry = terminalRegistry.get(paneId)
+  if (!entry) return null
+  return { cols: entry.terminal.cols, rows: entry.terminal.rows }
+}
+
 /** Full terminal reset after transport switch (clears parser state, modes, screen) */
 export function resetTerminal(paneId: string) {
   const entry = terminalRegistry.get(paneId)
