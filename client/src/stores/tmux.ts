@@ -744,15 +744,24 @@ export const useTmuxStore = defineStore('tmux', () => {
 
   // ── Pane Operations (use qualified IDs) ─────────────────────────────
 
-  function subscribePane(qualifiedId: QualifiedPaneId, handler: PaneOutputHandler) {
+  /** Register output handler only (no network message) */
+  function registerPaneHandler(qualifiedId: QualifiedPaneId, handler: PaneOutputHandler) {
     paneHandlers.set(qualifiedId, handler)
+  }
 
+  /** Send subscribe message to server/agent (no handler registration) */
+  function sendSubscribe(qualifiedId: QualifiedPaneId) {
     const { sessionId, paneId } = parseQualifiedPaneId(qualifiedId)
     const p2p = sessionId ? p2pConnections.get(sessionId) : null
-
     const rawMsg = { t: 'sub', pane: paneId }
     const sender = p2p?.send || wsSend
     if (sender) sender(rawMsg)
+  }
+
+  /** Register handler + send subscribe (legacy combined API) */
+  function subscribePane(qualifiedId: QualifiedPaneId, handler: PaneOutputHandler) {
+    registerPaneHandler(qualifiedId, handler)
+    sendSubscribe(qualifiedId)
   }
 
   function unsubscribePane(qualifiedId: QualifiedPaneId) {
@@ -839,6 +848,8 @@ export const useTmuxStore = defineStore('tmux', () => {
     connectQuic,
     connectWebRtc: connectWebRtcTransport,
     subscribePane,
+    registerPaneHandler,
+    sendSubscribe,
     unsubscribePane,
     sendInput,
     sendResize,
