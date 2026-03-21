@@ -135,9 +135,20 @@ async fn handle_session(
     // Channel for DataChannel messages → main event loop (so all msg types are handled)
     let (dc_msg_tx, mut dc_msg_rx) = mpsc::channel::<Vec<u8>>(256);
 
+    // Wrap control mode in a restart loop — it may exit when Claude Code
+    // restores terminal state (alternate screen buffer switch, etc.)
     let ctrl_handle = tokio::spawn(async move {
-        if let Err(e) = run_control_mode(&ctrl_session_name, output_tx).await {
-            warn!(error = %e, "control mode ended");
+        loop {
+            info!(session = %ctrl_session_name, "starting control mode");
+            match run_control_mode(&ctrl_session_name, output_tx.clone()).await {
+                Ok(()) => {
+                    info!(session = %ctrl_session_name, "control mode exited cleanly, restarting in 1s");
+                }
+                Err(e) => {
+                    warn!(session = %ctrl_session_name, error = %e, "control mode error, restarting in 1s");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
 
@@ -207,8 +218,11 @@ async fn handle_session(
                         }
                     }
                     None => {
-                        warn!("control mode channel closed");
-                        break;
+                        // Control mode exited (e.g., Claude Code exit restores terminal).
+                        // Don't break — control mode restarts automatically.
+                        // Recreate the channel to receive from the restarted control mode.
+                        warn!("control mode channel closed, waiting for restart");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }
             }
