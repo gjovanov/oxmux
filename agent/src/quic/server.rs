@@ -649,6 +649,16 @@ async fn create_webrtc_answer(
                 })
             }));
 
+            // Clear DC from store on close (stops output routing via DC)
+            let store_for_close = store.clone();
+            dc.on_close(Box::new(move || {
+                let s = store_for_close.clone();
+                Box::pin(async move {
+                    info!("WebRTC DataChannel closed (agent side)");
+                    *s.lock().await = None;
+                })
+            }));
+
             // Forward messages to main event loop
             dc.on_message(Box::new(move |msg: DataChannelMessage| {
                 let data = msg.data.to_vec();

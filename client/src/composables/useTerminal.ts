@@ -49,11 +49,15 @@ function disposeEntry(paneId: string) {
   terminalRegistry.delete(paneId)
 }
 
-/** Reset a terminal's parser state (e.g., after transport switch to clear partial UTF-8) */
+/** Full terminal reset after transport switch (clears parser state, modes, screen) */
 export function resetTerminal(paneId: string) {
   const entry = terminalRegistry.get(paneId)
   if (entry) {
-    entry.terminal.write('\x1b[2J\x1b[H') // clear screen + cursor home
+    // Full reset: clears parser state, cursor, modes, scrollback — fixes:
+    // - Partial UTF-8 sequences from old transport (U+FFFD errors)
+    // - Stuck alternate screen buffer from Claude Code TUI
+    // - Input mode corruption causing duplicate characters
+    entry.terminal.reset()
   }
 }
 
