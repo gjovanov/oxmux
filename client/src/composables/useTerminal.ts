@@ -116,15 +116,18 @@ export function useTerminal(
       })
       existing.resizeObserver.observe(containerRef.value)
 
-      // Fit to new container (double-fit: immediate + delayed for layout settling)
+      // Fit to new container + force SIGWINCH for TUI apps
       requestAnimationFrame(() => {
         existing.fitAddon.fit()
-        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+        const cols = existing.terminal.cols
+        const rows = existing.terminal.rows
+        if (cols > 1) {
+          store.sendResize(pid, cols - 1, rows)
+          setTimeout(() => store.sendResize(pid, cols, rows), 50)
+        } else {
+          store.sendResize(pid, cols, rows)
+        }
       })
-      setTimeout(() => {
-        existing.fitAddon.fit()
-        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
-      }, 200)
 
       term.value = existing.terminal
       return
@@ -205,6 +208,18 @@ export function useTerminal(
     store.subscribePane(pid, (data: Uint8Array) => {
       t.write(data)
     })
+
+    // Force SIGWINCH for already-running TUI apps (e.g., Claude Code).
+    // Send size-1 then correct size — tmux sends SIGWINCH on each change,
+    // which makes the app redraw at the correct dimensions.
+    if (t.cols > 1) {
+      setTimeout(() => {
+        store.sendResize(pid, t.cols - 1, t.rows)
+        setTimeout(() => {
+          store.sendResize(pid, t.cols, t.rows)
+        }, 50)
+      }, 300)
+    }
 
     // Resize observer for subsequent size changes
     let resizeTimer: ReturnType<typeof setTimeout>
