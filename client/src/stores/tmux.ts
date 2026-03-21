@@ -344,8 +344,9 @@ export const useTmuxStore = defineStore('tmux', () => {
 
       conn.onMessage((msg) => handleServerMsg(msg, sessionId))
       conn.onClose(() => {
-        console.warn(`[oxmux] [${sessionId.slice(0, 8)}] WebRTC P2P lost`)
+        console.warn(`[oxmux] [${sessionId.slice(0, 8)}] WebRTC P2P lost, falling back to SSH`)
         teardownP2P(sessionId)
+        resubscribePanesViaWS(sessionId)
       })
 
       console.log(`[oxmux] [${sessionId.slice(0, 8)}] WebRTC P2P connected!`)
@@ -381,8 +382,9 @@ export const useTmuxStore = defineStore('tmux', () => {
 
     conn.onMessage((msg) => handleServerMsg(msg, sessionId))
     conn.onClose(() => {
-      console.warn(`[oxmux] [${sessionId.slice(0, 8)}] QUIC P2P lost`)
+      console.warn(`[oxmux] [${sessionId.slice(0, 8)}] QUIC P2P lost, falling back to SSH`)
       teardownP2P(sessionId)
+      resubscribePanesViaWS(sessionId)
     })
 
     console.log(`[oxmux] [${sessionId.slice(0, 8)}] QUIC P2P connected!`)
@@ -404,6 +406,18 @@ export const useTmuxStore = defineStore('tmux', () => {
       const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
       if (sid === sessionId) {
         p2p.send({ t: 'sub', pane: paneId })
+      }
+    }
+  }
+
+  /** Re-subscribe panes for a session via WS after P2P drops */
+  function resubscribePanesViaWS(sessionId: string) {
+    if (!wsSend) return
+    for (const qid of paneHandlers.keys()) {
+      const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
+      if (sid === sessionId) {
+        console.log(`[oxmux] re-subscribing pane ${paneId} via WS`)
+        wsSend({ t: 'sub', pane: paneId })
       }
     }
   }
