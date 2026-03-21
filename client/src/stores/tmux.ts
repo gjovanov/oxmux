@@ -398,7 +398,7 @@ export const useTmuxStore = defineStore('tmux', () => {
     resubscribeSessionPanes(sessionId)
   }
 
-  /** Re-subscribe panes belonging to a session via its P2P connection + sync terminal size */
+  /** Re-subscribe panes belonging to a session via its P2P connection + force resize */
   function resubscribeSessionPanes(sessionId: string) {
     const p2p = p2pConnections.get(sessionId)
     if (!p2p) return
@@ -407,10 +407,15 @@ export const useTmuxStore = defineStore('tmux', () => {
       const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
       if (sid === sessionId) {
         p2p.send({ t: 'sub', pane: paneId })
-        // Sync terminal size so agent's tmux pane matches xterm.js
+        // Force SIGWINCH: send size-1 then correct size.
+        // If the pane was already at the correct size, tmux won't send SIGWINCH.
+        // The jiggle forces two size changes → two SIGWINCHs → app redraws.
         const size = getTerminalSize(qid)
-        if (size && size.cols > 0 && size.rows > 0) {
-          p2p.send({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+        if (size && size.cols > 1 && size.rows > 0) {
+          p2p.send({ t: 'r', pane: paneId, cols: size.cols - 1, rows: size.rows })
+          setTimeout(() => {
+            p2p.send({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+          }, 100)
         }
       }
     }
@@ -424,10 +429,13 @@ export const useTmuxStore = defineStore('tmux', () => {
       if (sid === sessionId) {
         console.log(`[oxmux] re-subscribing pane ${paneId} via WS`)
         wsSend({ t: 'sub', pane: paneId })
-        // Sync terminal size so SSH transport pane matches xterm.js
+        // Force SIGWINCH via size jiggle
         const size = getTerminalSize(qid)
-        if (size && size.cols > 0 && size.rows > 0) {
-          wsSend({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+        if (size && size.cols > 1 && size.rows > 0) {
+          wsSend({ t: 'r', pane: paneId, cols: size.cols - 1, rows: size.rows })
+          setTimeout(() => {
+            if (wsSend) wsSend({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
+          }, 100)
         }
         // Reset terminal to clear any partial UTF-8 from the old transport
         resetTerminal(qid)
