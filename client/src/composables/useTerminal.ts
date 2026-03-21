@@ -133,15 +133,19 @@ export function useTerminal(
       return
     }
 
-    // Create new terminal
+    // Responsive font size: mobile 11px, tablet 12px, desktop 13px
+    const vw = window.innerWidth
+    const fontSize = vw <= 767 ? 11 : vw <= 1023 ? 12 : 13
+    const lineHeight = vw <= 767 ? 1.15 : 1.2
+
     const t = new Terminal({
       allowProposedApi: true,
       scrollback: 10_000,
       fastScrollModifier: 'shift',
       theme: OXMUX_THEME,
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
+      fontSize,
+      lineHeight,
       cursorBlink: true,
       cursorStyle: 'block',
       macOptionIsMeta: true,
@@ -209,17 +213,7 @@ export function useTerminal(
       t.write(data)
     })
 
-    // Force SIGWINCH for already-running TUI apps (e.g., Claude Code).
-    // Send size-1 then correct size — tmux sends SIGWINCH on each change,
-    // which makes the app redraw at the correct dimensions.
-    if (t.cols > 1) {
-      setTimeout(() => {
-        store.sendResize(pid, t.cols - 1, t.rows)
-        setTimeout(() => {
-          store.sendResize(pid, t.cols, t.rows)
-        }, 50)
-      }, 300)
-    }
+    // Agent handles SIGWINCH jiggle on subscribe — no client-side jiggle needed.
 
     // Resize observer for subsequent size changes
     let resizeTimer: ReturnType<typeof setTimeout>

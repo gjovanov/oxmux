@@ -371,30 +371,28 @@ async fn handle_message(
             let pane = get_str(&msg, "pane");
             info!(pane = %pane, "client subscribed to pane");
 
-            // Send current pane content so terminal isn't blank after transport switch
+            // Force SIGWINCH via resize jiggle so TUI apps redraw at correct size.
+            // Don't use capture-pane — it races with resize and captures stale content.
+            // The live %output stream from tmux control mode delivers the redrawn content.
             if is_valid_pane_id(pane) {
+                // Read current pane dimensions
                 let socket = find_tmux_socket();
                 let mut cmd = std::process::Command::new("tmux");
                 if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["capture-pane", "-t", pane, "-p", "-e"]);
+                cmd.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
                 if let Ok(output) = cmd.output() {
-                    if output.status.success() && !output.stdout.is_empty() {
-                        let capture = output.stdout;
-                        let reply = serde_json::json!({
-                            "t": "o",
-                            "pane": pane,
-                            "data": capture,
-                        });
-                        if let Ok(encoded) = rmp_serde::to_vec_named(&reply) {
-                            // Try DC first, fall back to QUIC
-                            let sent_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
-                                if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                                    dc.send(&Bytes::from(encoded.clone())).await.is_ok()
-                                } else { false }
-                            } else { false };
-
-                            if !sent_dc {
-                                let _ = send_msg(send, &reply).await;
+                    if output.status.success() {
+                        let size_str = String::from_utf8_lossy(&output.stdout);
+                        let parts: Vec<&str> = size_str.trim().split_whitespace().collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
+                                if w > 1 {
+                                    // Jiggle: resize to (w-1, h) then back to (w, h)
+                                    let _ = tmux_mgr.resize_pane(pane, w - 1, h);
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                    let _ = tmux_mgr.resize_pane(pane, w, h);
+                                    info!(pane = %pane, cols = w, rows = h, "SIGWINCH jiggle on subscribe");
+                                }
                             }
                         }
                     }

@@ -4,9 +4,9 @@
     <div class="mashed-toolbar">
       <span class="mashed-title">Mashed View</span>
       <span class="mashed-count">{{ assignedCount }} / {{ totalSlots }} cells</span>
-      <div class="grid-selector">
+      <div v-if="!isMobile" class="grid-selector">
         <button
-          v-for="size in [2, 3, 4, 5]"
+          v-for="size in [2, 3, 4, 5].filter(s => s <= recommendedGridSize)"
           :key="size"
           class="grid-btn"
           :class="{ active: gridSize === size }"
@@ -66,17 +66,26 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useTmuxStore } from '@/stores/tmux'
 import { qualifyPaneId, type QualifiedPaneId } from '@/utils/paneId'
+import { useResponsive } from '@/composables/useResponsive'
 import MashedCell from '@/components/MashedCell.vue'
 
 const store = useTmuxStore()
+const { isMobile, recommendedGridSize } = useResponsive()
 
 const emit = defineEmits<{
   'switch-view': [mode: 'single']
 }>()
 
-// Grid size persisted in localStorage
-const gridSize = ref(parseInt(localStorage.getItem('oxmux_mashed_grid') || '2'))
+// Grid size: clamped to recommended max for viewport
+const gridSize = ref(Math.min(
+  parseInt(localStorage.getItem('oxmux_mashed_grid') || '2'),
+  recommendedGridSize.value
+))
 watch(gridSize, (val) => localStorage.setItem('oxmux_mashed_grid', String(val)))
+// Clamp grid size when viewport shrinks
+watch(recommendedGridSize, (max) => {
+  if (gridSize.value > max) gridSize.value = max
+})
 
 // Assignments: qualifiedPaneId or null per slot
 const assignments = ref<(QualifiedPaneId | null)[]>([])

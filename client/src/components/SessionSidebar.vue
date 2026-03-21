@@ -152,8 +152,10 @@
 import { computed } from 'vue'
 import { useTmuxStore } from '@/stores/tmux'
 import { qualifyPaneId } from '@/utils/paneId'
+import { useResponsive } from '@/composables/useResponsive'
 
 const store = useTmuxStore()
+const { isMobile, closeSidebar } = useResponsive()
 
 function transportLabelFor(sessionId?: string): string {
   const mode = sessionId ? store.getTransportMode(sessionId) : store.activeTransportMode
@@ -177,6 +179,7 @@ const statusLabel = computed(() => ({
 function selectPane(sessionId: string, paneId: string) {
   store.focusedSessionId = sessionId
   store.activePane = qualifyPaneId(sessionId, paneId)
+  if (isMobile.value) closeSidebar() // auto-close on mobile
 }
 
 function getSessionTrees(sessionId: string) {
@@ -342,4 +345,13 @@ function claudeCost(paneId: string): string {
 .action-btn.install { background: #89b4fa; color: #1e1e2e; margin-left: auto; }
 
 .empty-state { padding: 20px 12px; color: #45475a; text-align: center; line-height: 1.6; }
+
+/* Mobile: larger tap targets */
+@media (max-width: 767px) {
+  .pane-node { padding: 8px 12px; min-height: 40px; }
+  .action-btn { padding: 6px 12px; font-size: 12px; min-height: 36px; }
+  .ms-actions { flex-wrap: wrap; }
+  .sidebar-header { padding: 14px 12px; }
+  .sidebar-title { font-size: 15px; }
+}
 </style>
