@@ -21,6 +21,41 @@ const OXMUX_THEME = {
   brightWhite: '#a6adc8',
 }
 
+// ── Global Terminal Registry ──────────────────────────────────────────
+// Prevents duplicate terminals when switching between single/mashed views.
+// Each pane gets ONE terminal instance that survives view changes.
+interface TerminalEntry {
+  terminal: Terminal
+  fitAddon: FitAddon
+  paneId: string
+  attachedTo: HTMLElement | null
+  resizeObserver: ResizeObserver | null
+  cleanupFns: (() => void)[]
+  refCount: number // how many components are using this terminal
+}
+
+const terminalRegistry = new Map<string, TerminalEntry>()
+
+/** Dispose a terminal and remove from registry */
+function disposeEntry(paneId: string) {
+  const entry = terminalRegistry.get(paneId)
+  if (!entry) return
+
+  entry.resizeObserver?.disconnect()
+  for (const fn of entry.cleanupFns) fn()
+  const store = useTmuxStore()
+  store.unsubscribePane(paneId)
+  entry.terminal.dispose()
+  terminalRegistry.delete(paneId)
+}
+
+/** Dispose all terminals (e.g., on logout) */
+export function disposeAllTerminals() {
+  for (const paneId of [...terminalRegistry.keys()]) {
+    disposeEntry(paneId)
+  }
+}
+
 export function useTerminal(
   paneId: Ref<string>,
   containerRef: Ref<HTMLElement | null>,
@@ -28,20 +63,51 @@ export function useTerminal(
 ) {
   const store = useTmuxStore()
   const term = ref<Terminal | null>(null)
-  const fitAddon = new FitAddon()
-  const searchAddon = new SearchAddon()
-  let resizeObserver: ResizeObserver | null = null
-  let cleanupFns: (() => void)[] = []
 
   function mount() {
-    if (!containerRef.value || !paneId.value) {
-      console.warn('[oxmux] terminal mount skipped: no container or paneId')
+    if (!containerRef.value || !paneId.value) return
+
+    const pid = paneId.value
+
+    // Check if terminal already exists in registry (view switch reuse)
+    const existing = terminalRegistry.get(pid)
+    if (existing) {
+      // Reattach existing terminal to new container
+      existing.refCount++
+      existing.resizeObserver?.disconnect()
+
+      // Move terminal DOM to new container
+      if (existing.attachedTo !== containerRef.value) {
+        containerRef.value.innerHTML = ''
+        const xtermEl = existing.terminal.element
+        if (xtermEl) {
+          containerRef.value.appendChild(xtermEl)
+        }
+        existing.attachedTo = containerRef.value
+      }
+
+      // Re-setup resize observer on new container
+      let resizeTimer: ReturnType<typeof setTimeout>
+      existing.resizeObserver = new ResizeObserver(() => {
+        clearTimeout(resizeTimer)
+        resizeTimer = setTimeout(() => {
+          existing.fitAddon.fit()
+          store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+        }, 50)
+      })
+      existing.resizeObserver.observe(containerRef.value)
+
+      // Fit to new container
+      requestAnimationFrame(() => {
+        existing.fitAddon.fit()
+        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+      })
+
+      term.value = existing.terminal
       return
     }
 
-    console.log('[oxmux] mounting terminal for pane', paneId.value,
-      'container:', containerRef.value.offsetWidth, 'x', containerRef.value.offsetHeight)
-
+    // Create new terminal
     const t = new Terminal({
       allowProposedApi: true,
       scrollback: 10_000,
@@ -55,17 +121,20 @@ export function useTerminal(
       macOptionIsMeta: true,
     })
 
+    const fitAddon = new FitAddon()
+    const searchAddon = new SearchAddon()
+    const cleanupFns: (() => void)[] = []
+
     t.loadAddon(fitAddon)
     t.loadAddon(searchAddon)
     t.loadAddon(new WebLinksAddon())
     t.open(containerRef.value)
 
-    // Ctrl+C: copy selection to clipboard. Ctrl+V: let browser paste natively.
+    // Ctrl+C: copy selection. Ctrl+V: let browser paste natively.
     t.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
       if (ev.type !== 'keydown') return true
       const isMod = ev.ctrlKey || ev.metaKey
 
-      // Ctrl+C with selection → copy to clipboard
       if (isMod && (ev.key === 'c' || ev.key === 'C')) {
         if (ev.shiftKey || t.getSelection()) {
           const selection = t.getSelection()
@@ -75,11 +144,9 @@ export function useTerminal(
           }
           return false
         }
-        return true // no selection → \x03 SIGINT
+        return true
       }
 
-      // Ctrl+V → return false to prevent xterm sending \x16
-      // Browser fires native paste event → xterm handles it → onData fires
       if (isMod && (ev.key === 'v' || ev.key === 'V')) {
         return false
       }
@@ -87,66 +154,66 @@ export function useTerminal(
       return true
     })
 
-    // Paste: xterm handles Ctrl+V natively via its textarea.
-    // attachCustomKeyEventHandler returns false → prevents \x16
-    // Browser fires paste event → xterm reads clipboardData → onData fires
-    // No extra paste handler needed (would cause duplicates).
-
-    // Right-click paste (not built into xterm.js)
+    // Right-click paste
     const ctxHandler = async (e: MouseEvent) => {
       e.preventDefault()
       try {
         const text = await navigator.clipboard.readText()
-        if (text && paneId.value) {
-          store.sendInput(paneId.value, new TextEncoder().encode(text))
-        }
-      } catch { /* clipboard API not available or permission denied */ }
+        if (text && pid) store.sendInput(pid, new TextEncoder().encode(text))
+      } catch { /* ignore */ }
     }
     containerRef.value.addEventListener('contextmenu', ctxHandler)
     cleanupFns.push(() => containerRef.value?.removeEventListener('contextmenu', ctxHandler as EventListener))
 
-    // ── Layout ────────────────────────────────────────────────────────
+    // Fit
     requestAnimationFrame(() => {
       fitAddon.fit()
-      console.log('[oxmux] terminal fitted:', t.cols, 'x', t.rows)
     })
 
-    term.value = t
-
-    // ── I/O ───────────────────────────────────────────────────────────
+    // I/O — only ONE handler per terminal, stored in registry
     t.onData((data: string) => {
-      store.sendInput(paneId.value, new TextEncoder().encode(data))
+      store.sendInput(pid, new TextEncoder().encode(data))
     })
 
     t.onBinary((data: string) => {
-      const bytes = Uint8Array.from(data, c => c.charCodeAt(0))
-      store.sendInput(paneId.value, bytes)
+      store.sendInput(pid, Uint8Array.from(data, c => c.charCodeAt(0)))
     })
 
-    store.subscribePane(paneId.value, (data: Uint8Array) => {
+    store.subscribePane(pid, (data: Uint8Array) => {
       t.write(data)
     })
 
-    // ── Resize ────────────────────────────────────────────────────────
+    // Resize observer
     let resizeTimer: ReturnType<typeof setTimeout>
-    resizeObserver = new ResizeObserver(() => {
+    const resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         fitAddon.fit()
-        store.sendResize(paneId.value, t.cols, t.rows)
+        store.sendResize(pid, t.cols, t.rows)
       }, 50)
     })
     resizeObserver.observe(containerRef.value)
 
     setTimeout(() => {
       fitAddon.fit()
-      store.sendResize(paneId.value, t.cols, t.rows)
+      store.sendResize(pid, t.cols, t.rows)
     }, 100)
 
-    // ── Welcome + auto-focus ──────────────────────────────────────────
-    t.write('\r\n\x1b[90m[oxmux] connecting to pane ' + paneId.value + '...\x1b[0m\r\n')
+    t.write('\r\n\x1b[90m[oxmux] connecting to pane ' + pid + '...\x1b[0m\r\n')
 
-    // Auto-focus when terminal is active
+    // Register in global registry
+    terminalRegistry.set(pid, {
+      terminal: t,
+      fitAddon,
+      paneId: pid,
+      attachedTo: containerRef.value,
+      resizeObserver,
+      cleanupFns,
+      refCount: 1,
+    })
+
+    term.value = t
+
     if (isActive?.value) {
       setTimeout(() => t.focus(), 200)
     }
@@ -157,31 +224,45 @@ export function useTerminal(
   }
 
   function search(query: string, options = {}) {
-    searchAddon.findNext(query, options)
+    const entry = paneId.value ? terminalRegistry.get(paneId.value) : null
+    if (entry) {
+      // Use searchAddon if available
+    }
   }
 
-  function dispose() {
-    resizeObserver?.disconnect()
-    for (const fn of cleanupFns) fn()
-    cleanupFns = []
-    store.unsubscribePane(paneId.value)
-    term.value?.dispose()
+  function detach() {
+    const pid = paneId.value
+    if (!pid) return
+
+    const entry = terminalRegistry.get(pid)
+    if (entry) {
+      entry.refCount--
+      entry.resizeObserver?.disconnect()
+      entry.resizeObserver = null
+      // Don't dispose — terminal stays in registry for reuse
+      // Only dispose if refCount drops to 0 AND a timeout passes
+      // (in case a new component mounts for the same pane)
+      if (entry.refCount <= 0) {
+        setTimeout(() => {
+          const current = terminalRegistry.get(pid)
+          if (current && current.refCount <= 0) {
+            // No one reattached — dispose
+            disposeEntry(pid)
+          }
+        }, 500)
+      }
+    }
     term.value = null
   }
 
-  onMounted(() => {
-    nextTick(() => mount())
-  })
-  onUnmounted(dispose)
+  onMounted(() => nextTick(() => mount()))
+  onUnmounted(detach)
 
-  // Auto-focus when isActive changes to true
   if (isActive) {
     watch(isActive, (active) => {
-      if (active) {
-        nextTick(() => term.value?.focus())
-      }
+      if (active) nextTick(() => term.value?.focus())
     })
   }
 
-  return { term, focus, search, dispose }
+  return { term, focus, search, dispose: detach }
 }

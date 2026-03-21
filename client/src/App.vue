@@ -1,7 +1,11 @@
 <template>
   <LoginPage v-if="!auth.isAuthenticated" />
   <div v-else class="app">
-    <SessionSidebar />
+    <SessionSidebar :style="{ width: sidebarWidth + 'px' }" />
+    <div
+      class="sidebar-resizer"
+      @mousedown="startResize"
+    />
     <NewSessionDialog v-if="store.showNewSessionDialog" />
     <main class="pane-area">
       <!-- View mode toggle -->
@@ -69,7 +73,7 @@ const auth = useAuthStore()
 const store = useTmuxStore()
 
 const viewMode = ref<'single' | 'mashed'>(
-  (localStorage.getItem('oxmux_view_mode') as 'single' | 'mashed') || 'single'
+  (localStorage.getItem('oxmux_view_mode') as 'single' | 'mashed') || 'mashed'
 )
 watch(viewMode, (v) => localStorage.setItem('oxmux_view_mode', v))
 
@@ -103,6 +107,31 @@ const activeIsClaudePane = computed(() => {
 
 function openDiff(path: string) {
   console.log('Open diff:', path)
+}
+
+// Resizable sidebar
+const sidebarWidth = ref(parseInt(localStorage.getItem('oxmux_sidebar_w') || '260'))
+
+function startResize(e: MouseEvent) {
+  e.preventDefault()
+  const startX = e.clientX
+  const startW = sidebarWidth.value
+
+  const onMove = (ev: MouseEvent) => {
+    const newW = Math.max(180, Math.min(500, startW + ev.clientX - startX))
+    sidebarWidth.value = newW
+  }
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    localStorage.setItem('oxmux_sidebar_w', String(sidebarWidth.value))
+  }
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
 }
 </script>
 
@@ -139,6 +168,15 @@ body { background: #1e1e2e; color: #cdd6f4; font-family: system-ui, sans-serif; 
 }
 .toggle-btn:hover { background: #45475a; }
 .toggle-btn.active { background: #89b4fa; color: #1e1e2e; }
+
+.sidebar-resizer {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sidebar-resizer:hover { background: #89b4fa; }
 
 .empty-pane {
   flex: 1;

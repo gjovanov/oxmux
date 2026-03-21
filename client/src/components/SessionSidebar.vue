@@ -210,8 +210,9 @@ function claudeCost(paneId: string): string {
 
 <style scoped>
 .session-sidebar {
-  width: 260px;
-  min-width: 220px;
+  min-width: 180px;
+  max-width: 500px;
+  flex-shrink: 0;
   background: #181825;
   border-right: 1px solid #313244;
   display: flex;
