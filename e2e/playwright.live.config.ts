@@ -5,7 +5,7 @@ export default defineConfig({
   workers: 1,
   timeout: 60_000,
   use: {
-    baseURL: 'https://oxmux.app',
+    baseURL: process.env.BASE_URL || 'http://localhost:8080',
     trace: 'retain-on-failure',
   },
   projects: [

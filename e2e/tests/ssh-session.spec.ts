@@ -1,11 +1,11 @@
 import { test, expect, Page } from '@playwright/test'
 
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
-const TEST_USER = 'e2e_test_user'
-const TEST_PASS = 'e2e_test_pass_1234'
-const SSH_HOST = '94.130.141.98'
-const SSH_USER = 'gjovanov'
-const SSH_KEY_PATH = '~/.ssh/id_secunet'
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8080'
+const TEST_USER = process.env.E2E_USER || 'e2e_test'
+const TEST_PASS = process.env.E2E_PASS || 'e2e_test_pass'
+const SSH_HOST = process.env.E2E_SSH_HOST || '127.0.0.1'
+const SSH_USER = process.env.E2E_SSH_USER || 'test'
+const SSH_KEY_PATH = process.env.E2E_SSH_KEY || '~/.ssh/id_ed25519'
 
 async function authenticate(page: Page) {
   await page.goto(BASE_URL)
@@ -35,7 +35,7 @@ async function createSshSession(page: Page, sessionName: string): Promise<void> 
 
   await page.locator('input[placeholder="my-project"]').fill(sessionName)
   await page.locator('select').first().selectOption('ssh')
-  await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
+  await page.locator('input[placeholder="192.0.2.1"]').fill(SSH_HOST)
   await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
   await page.locator('select').nth(1).selectOption('private_key')
   await page.locator('input[placeholder="~/.ssh/id_ed25519"]').fill(SSH_KEY_PATH)
@@ -222,7 +222,7 @@ test.describe('Transport 1: WebSocket → SSH', () => {
 
     // Start Claude Code
     await page.keyboard.type(
-      'cd /home/gjovanov/gjovanov && bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions --continue',
+      'cd /home/${SSH_USER} && bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions --continue',
       { delay: 15 }
     )
     await page.keyboard.press('Enter')

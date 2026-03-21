@@ -443,12 +443,20 @@ pub async fn handle_client_msg(
                         agent_host = %agent.host,
                         "transport upgrade ready"
                     );
-                    // Map host IP to agent DNS name (*.oxmux.app wildcard cert)
-                    let agent_host = match agent.host.as_str() {
-                        "94.130.141.98" => "agent-mars.oxmux.app".to_string(),
-                        "5.9.157.226" => "agent-zeus.oxmux.app".to_string(),
-                        "5.9.157.221" => "agent-jupiter.oxmux.app".to_string(),
-                        other => format!("agent-{}.oxmux.app", other.replace('.', "-")),
+                    // Map host IP to agent DNS name via AGENT_DNS_MAP env var
+                    // Format: "ip1=dns1,ip2=dns2" e.g. "1.2.3.4=agent-foo.example.com"
+                    // Falls back to "agent-{ip-with-dashes}.oxmux.app"
+                    let agent_host = {
+                        let dns_map = std::env::var("AGENT_DNS_MAP").unwrap_or_default();
+                        let mapped = dns_map.split(',')
+                            .filter_map(|entry| entry.split_once('='))
+                            .find(|(ip, _)| ip.trim() == agent.host)
+                            .map(|(_, dns)| dns.trim().to_string());
+                        mapped.unwrap_or_else(|| {
+                            let domain = std::env::var("AGENT_DNS_DOMAIN")
+                                .unwrap_or_else(|_| "oxmux.app".to_string());
+                            format!("agent-{}.{}", agent.host.replace('.', "-"), domain)
+                        })
                     };
                     Some(ServerMsg::TransportUpgradeReady {
                         session_id,

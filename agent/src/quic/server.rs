@@ -610,7 +610,7 @@ async fn create_webrtc_answer(
         );
 
         let turn_servers = std::env::var("COTURN_SERVERS")
-            .unwrap_or_else(|_| "94.130.141.98:3478,5.9.157.226:3478,5.9.157.221:3478".to_string());
+            .unwrap_or_default();
         let turn_urls: Vec<String> = turn_servers.split(',')
             .map(|s| format!("turn:{}", s.trim()))
             .collect();

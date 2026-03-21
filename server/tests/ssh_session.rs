@@ -1,8 +1,8 @@
-//! Integration tests for the SSH transport against the real mars server (94.130.141.98).
+//! Integration tests for the SSH transport. Set E2E_ssh_host().as_str(), E2E_ssh_user().as_str(), E2E_SSH_KEY env vars.
 //!
 //! These tests require:
-//! - The SSH key at `/home/gjovanov/.ssh/id_secunet` (unencrypted, no passphrase)
-//! - Network access to 94.130.141.98:22
+//! - The SSH key at $E2E_SSH_KEY (unencrypted, no passphrase)
+//! - Network access to $E2E_ssh_host().as_str():22
 //! - tmux installed on the remote host
 
 use bytes::Bytes;
@@ -17,10 +17,10 @@ use oxmux_server::session::ssh_transport::SshTransport;
 use oxmux_server::session::transport::Transport;
 use oxmux_server::session::types::SshAuthConfig;
 
-const SSH_HOST: &str = "94.130.141.98";
+const ssh_host().as_str(): &str = env!("E2E_ssh_host().as_str()", "127.0.0.1");
 const SSH_PORT: u16 = 22;
-const SSH_USER: &str = "gjovanov";
-const SSH_KEY_PATH: &str = "/home/gjovanov/.ssh/id_secunet";
+fn ssh_user() -> String { std::env::var("E2E_ssh_user().as_str()").unwrap_or_else(|_| "test".to_string()) }
+fn ssh_key_path() -> String { std::env::var("E2E_SSH_KEY").unwrap_or_else(|_| format!("{}/.ssh/id_ed25519", std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))) }
 
 /// Create a unique session name for test isolation.
 fn test_session_name() -> String {
@@ -43,11 +43,11 @@ fn build_transport(
     pane_outputs: Arc<DashMap<String, broadcast::Sender<Bytes>>>,
 ) -> SshTransport {
     SshTransport::new(
-        SSH_HOST.to_string(),
+        ssh_host().as_str().to_string(),
         SSH_PORT,
-        SSH_USER.to_string(),
+        ssh_user().as_str().to_string(),
         SshAuthConfig::PrivateKey {
-            path: SSH_KEY_PATH.to_string(),
+            path: ssh_key_path().as_str().to_string(),
             passphrase: None,
         },
         session_name.to_string(),

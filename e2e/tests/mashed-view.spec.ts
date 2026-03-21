@@ -1,8 +1,5 @@
 import { test, expect, Page } from '@playwright/test'
-
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
-const TEST_USER = 'gjovanov'
-const TEST_PASS = 'test1234'
+import { BASE_URL, TEST_USER, TEST_PASS } from './helpers'
 
 async function authenticate(page: Page) {
   await page.goto(BASE_URL)

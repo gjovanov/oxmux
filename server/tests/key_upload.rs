@@ -46,7 +46,7 @@ async fn get_auth_token(client: &reqwest::Client, base_url: &str) -> Result<Stri
 
 #[tokio::test]
 async fn test_upload_valid_key() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
     let token = get_auth_token(&client, &base_url).await?;
 
@@ -71,7 +71,7 @@ async fn test_upload_valid_key() -> Result<()> {
 
 #[tokio::test]
 async fn test_upload_invalid_key() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
     let token = get_auth_token(&client, &base_url).await?;
 
@@ -96,7 +96,7 @@ async fn test_upload_invalid_key() -> Result<()> {
 
 #[tokio::test]
 async fn test_upload_empty_key() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
     let token = get_auth_token(&client, &base_url).await?;
 
@@ -117,7 +117,7 @@ async fn test_upload_empty_key() -> Result<()> {
 
 #[tokio::test]
 async fn test_upload_key_too_large() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
     let token = get_auth_token(&client, &base_url).await?;
 
@@ -139,7 +139,7 @@ async fn test_upload_key_too_large() -> Result<()> {
 
 #[tokio::test]
 async fn test_upload_without_auth() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
 
     let res = client
@@ -158,7 +158,7 @@ async fn test_upload_without_auth() -> Result<()> {
 
 #[tokio::test]
 async fn test_upload_with_invalid_token() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
 
     let res = client

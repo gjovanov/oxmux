@@ -1,11 +1,15 @@
 import { expect, Page } from '@playwright/test'
 
-export const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
-export const TEST_USER = 'gjovanov'
-export const TEST_PASS = 'test1234'
-export const SSH_HOST = '94.130.141.98'
-export const SSH_USER = 'gjovanov'
-export const SSH_KEY = '~/.ssh/id_secunet'
+export const BASE_URL = process.env.BASE_URL || 'http://localhost:8080'
+export const TEST_USER = requireEnv('E2E_USER', 'e2e_test')
+export const TEST_PASS = requireEnv('E2E_PASS', 'e2e_test_pass')
+export const SSH_HOST = requireEnv('E2E_SSH_HOST', '127.0.0.1')
+export const SSH_USER = requireEnv('E2E_SSH_USER', 'test')
+export const SSH_KEY = requireEnv('E2E_SSH_KEY', '~/.ssh/id_ed25519')
+
+function requireEnv(name: string, fallback: string): string {
+  return process.env[name] || fallback
+}
 
 export async function authenticate(page: Page) {
   await page.goto(BASE_URL)
@@ -37,7 +41,7 @@ export async function ensureConnectedSession(page: Page) {
   await expect(page.locator('.dialog')).toBeVisible({ timeout: 5000 })
   await page.locator('input[placeholder="my-project"]').fill('e2e-' + Date.now())
   await page.locator('select').first().selectOption('ssh')
-  await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
+  await page.locator('input[placeholder="192.0.2.1"]').fill(SSH_HOST)
   await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
   await page.locator('select').nth(1).selectOption('private_key')
   await page.locator('input[placeholder="~/.ssh/id_ed25519"]').fill(SSH_KEY)

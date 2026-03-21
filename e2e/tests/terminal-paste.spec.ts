@@ -1,66 +1,7 @@
 import { test, expect, Page } from '@playwright/test'
+import { BASE_URL, TEST_USER, TEST_PASS, SSH_HOST, SSH_USER, SSH_KEY, authenticate, ensureConnectedSession } from './helpers'
 
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
-const TEST_USER = 'gjovanov'
-const TEST_PASS = 'test1234'
-const SSH_HOST = '94.130.141.98'
-const SSH_USER = 'gjovanov'
-const SSH_KEY = '~/.ssh/id_secunet'
-
-async function authenticate(page: Page) {
-  await page.goto(BASE_URL)
-  await page.waitForLoadState('networkidle')
-
-  if (await page.locator('.session-sidebar').isVisible({ timeout: 3000 }).catch(() => false)) {
-    return
-  }
-
-  const loginTab = page.locator('button', { hasText: 'Login' })
-  if (await loginTab.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await loginTab.click()
-  }
-
-  await page.locator('input[type="text"]').fill(TEST_USER)
-  await page.locator('input[type="password"]').fill(TEST_PASS)
-  await page.locator('button[type="submit"]').click()
-  await expect(page.locator('.session-sidebar')).toBeVisible({ timeout: 15_000 })
-}
-
-async function ensureConnectedSession(page: Page) {
-  // Check if we already have a connected session with panes
-  if (await page.locator('.pane-node').first().isVisible({ timeout: 2000 }).catch(() => false)) {
-    return
-  }
-
-  // Check if there's an existing session to connect
-  const connectBtn = page.locator('.action-btn.connect').first()
-  if (await connectBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await connectBtn.click()
-    await expect(page.locator('.pane-node').first()).toBeVisible({ timeout: 30_000 })
-    return
-  }
-
-  // No sessions — create one
-  await page.locator('.add-btn').click()
-  await expect(page.locator('.dialog')).toBeVisible({ timeout: 5000 })
-
-  await page.locator('input[placeholder="my-project"]').fill('paste-test-' + Date.now())
-  await page.locator('select').first().selectOption('ssh')
-  await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
-  await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
-  await page.locator('select').nth(1).selectOption('private_key')
-  await page.locator('input[placeholder="~/.ssh/id_ed25519"]').fill(SSH_KEY)
-  await page.locator('button', { hasText: 'Create' }).click()
-
-  // Wait for session to appear and connect it
-  await page.waitForTimeout(1000)
-  const newConnectBtn = page.locator('.action-btn.connect').first()
-  await expect(newConnectBtn).toBeVisible({ timeout: 5000 })
-  await newConnectBtn.click()
-
-  // Wait for panes to appear (SSH connection + tmux setup)
-  await expect(page.locator('.pane-node').first()).toBeVisible({ timeout: 45_000 })
-}
+// Uses shared helpers from helpers.ts — credentials come from env vars
 
 test.describe('Terminal Paste', () => {
   test('paste via dispatched ClipboardEvent on xterm textarea', async ({ page, context }) => {

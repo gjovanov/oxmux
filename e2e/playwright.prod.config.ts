@@ -11,7 +11,7 @@ export default defineConfig({
   globalSetup: './global-setup.ts',
 
   use: {
-    baseURL: process.env.BASE_URL || 'https://oxmux.app',
+    baseURL: process.env.BASE_URL || process.env.BASE_URL || 'http://localhost:8080',
     trace: 'on-first-retry',
     video: 'on-first-retry',
     ignoreHTTPSErrors: true,

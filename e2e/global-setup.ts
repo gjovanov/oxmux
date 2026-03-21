@@ -1,6 +1,6 @@
 import { request } from '@playwright/test'
 
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
+const BASE_URL = process.env.BASE_URL || process.env.BASE_URL || 'http://localhost:8080'
 const TEST_USER = 'e2e_test_user'
 const TEST_PASS = 'e2e_test_pass_1234'
 

@@ -33,8 +33,8 @@ describe('MashedView store integration', () => {
 
   it('allPanes returns qualified panes from multiple sessions', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.managedSessions.push(sessA, sessB)
     store.sessionTrees.set('aaa', sessA.tmux_sessions)
@@ -49,7 +49,7 @@ describe('MashedView store integration', () => {
 
   it('allPanes includes session metadata', () => {
     const store = useTmuxStore()
-    const sess = makeSession('aaa', 'mars', '94.130.141.98')
+    const sess = makeSession('aaa', 'mars', '198.51.100.10')
     store.managedSessions.push(sess)
     store.sessionTrees.set('aaa', sess.tmux_sessions)
 
@@ -62,8 +62,8 @@ describe('MashedView store integration', () => {
 
   it('auto-fill grid distributes panes across NxN grid', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.managedSessions.push(sessA, sessB)
     store.sessionTrees.set('aaa', sessA.tmux_sessions)
@@ -104,8 +104,8 @@ describe('MashedView store integration', () => {
 
   it('disconnecting one session preserves others in grid', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.managedSessions.push(sessA, sessB)
     store.connectedSessionIds.add('aaa')

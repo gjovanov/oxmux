@@ -26,7 +26,7 @@
         <template v-if="backendType === 'ssh' || backendType === 'agent'">
           <label class="field">
             <span class="field-label">Host</span>
-            <input v-model="host" type="text" placeholder="94.130.141.98" />
+            <input v-model="host" type="text" placeholder="192.0.2.1" />
           </label>
           <label class="field" v-if="backendType === 'agent'">
             <span class="field-label">Agent Port</span>

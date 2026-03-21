@@ -33,8 +33,8 @@ describe('useTmuxStore — multi-session', () => {
 
   it('tracks multiple connected sessions independently', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars-session', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus-session', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars-session', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus-session', '198.51.100.20')
 
     // Simulate sess_connected for both
     store.managedSessions.push(sessA, sessB)
@@ -53,8 +53,8 @@ describe('useTmuxStore — multi-session', () => {
 
   it('allPanes returns qualified panes from all sessions', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.managedSessions.push(sessA, sessB)
     store.sessionTrees.set('aaa', sessA.tmux_sessions)
@@ -70,8 +70,8 @@ describe('useTmuxStore — multi-session', () => {
 
   it('disconnectSessionCleanup removes only that session', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.managedSessions.push(sessA, sessB)
     store.connectedSessionIds.add('aaa')
@@ -120,8 +120,8 @@ describe('useTmuxStore — multi-session', () => {
 
   it('sessions computed returns trees for focused session', () => {
     const store = useTmuxStore()
-    const sessA = makeSession('aaa', 'mars', '94.130.141.98')
-    const sessB = makeSession('bbb', 'zeus', '5.9.157.226')
+    const sessA = makeSession('aaa', 'mars', '198.51.100.10')
+    const sessB = makeSession('bbb', 'zeus', '198.51.100.20')
 
     store.sessionTrees.set('aaa', sessA.tmux_sessions)
     store.sessionTrees.set('bbb', sessB.tmux_sessions)

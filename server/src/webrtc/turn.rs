@@ -92,7 +92,10 @@ pub fn build_ice_config(credentials: &TurnCredentials) -> IceConfig {
             IceServer {
                 urls: {
                     let mut urls = turn_urls;
-                    urls.push("turns:coturn.roomler.live:443?transport=tcp".to_string());
+                    // Add TURNS via domain name if configured
+                    if let Ok(turns_domain) = std::env::var("COTURN_TURNS_DOMAIN") {
+                        urls.push(format!("turns:{}:443?transport=tcp", turns_domain));
+                    }
                     urls
                 },
                 username: Some(credentials.username.clone()),

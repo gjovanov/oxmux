@@ -4,7 +4,7 @@ use anyhow::Result;
 
 #[tokio::test]
 async fn test_register_and_login() -> Result<()> {
-    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "https://oxmux.app".to_string());
+    let base_url = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = reqwest::Client::new();
 
     let username = format!("test_auth_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());

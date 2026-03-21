@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test'
 
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
-const TEST_USER = 'e2e_test_user'
-const TEST_PASS = 'e2e_test_pass_1234'
-const SSH_HOST = '94.130.141.98'
-const SSH_KEY = '~/.ssh/id_secunet'
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8080'
+const TEST_USER = process.env.E2E_USER || 'e2e_test'
+const TEST_PASS = process.env.E2E_PASS || 'e2e_test_pass'
+const SSH_HOST = process.env.E2E_SSH_HOST || '127.0.0.1'
+const SSH_KEY = process.env.E2E_SSH_KEY || '~/.ssh/id_ed25519'
 
 test('debug terminal output flow', async ({ page }) => {
   const consoleLogs: string[] = []
@@ -35,8 +35,8 @@ test('debug terminal output flow', async ({ page }) => {
   await page.locator('.add-btn').click()
   await page.locator('input[placeholder="my-project"]').fill(name)
   await page.locator('select').first().selectOption('ssh')
-  await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
-  await page.locator('input[placeholder="ubuntu"]').fill('gjovanov')
+  await page.locator('input[placeholder="192.0.2.1"]').fill(SSH_HOST)
+  await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
   await page.locator('select').nth(1).selectOption('private_key')
   await page.locator('input[placeholder="~/.ssh/id_ed25519"]').fill(SSH_KEY)
   await page.locator('button', { hasText: 'Create' }).first().click()

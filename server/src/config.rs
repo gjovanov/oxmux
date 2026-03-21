@@ -86,7 +86,7 @@ impl Config {
             },
             coturn: CoturnConfig {
                 auth_secret: SecretString::new(cfg.get_string("COTURN_AUTH_SECRET")?.into()),
-                realm: cfg.get_string("COTURN_REALM").unwrap_or_else(|_| "coturn.roomler.live".to_string()),
+                realm: cfg.get_string("COTURN_REALM").unwrap_or_else(|_| "localhost".to_string()),
                 ttl: cfg.get_int("COTURN_TTL").unwrap_or(86400) as u64,
                 servers: cfg.get_string("COTURN_SERVERS")
                     .unwrap_or_else(|_| "198.51.100.10:3478,198.51.100.20:3478,198.51.100.30:3478".to_string()),

@@ -3,14 +3,14 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 
-const BASE_URL = process.env.BASE_URL || 'https://oxmux.app'
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8080'
 const TEST_USER = 'e2e_test_user'
 const TEST_PASS = 'e2e_test_pass_1234'
-const SSH_HOST = '94.130.141.98'
-const SSH_USER = 'gjovanov'
+const SSH_HOST = process.env.E2E_SSH_HOST || '127.0.0.1'
+const SSH_USER = process.env.E2E_SSH_USER || 'test'
 
 // Path to a real key for E2E testing (same as used by other tests)
-const SSH_KEY_PATH = path.join(os.homedir(), '.ssh', 'id_secunet')
+const SSH_KEY_PATH = process.env.E2E_SSH_KEY || path.join(os.homedir(), '.ssh', 'id_ed25519')
 
 async function authenticate(page: Page) {
   await page.goto(BASE_URL)
@@ -99,7 +99,7 @@ test.describe('SSH Key Upload', () => {
 
     await page.locator('input[placeholder="my-project"]').fill(sessionName)
     await page.locator('select').first().selectOption('ssh')
-    await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
+    await page.locator('input[placeholder="192.0.2.1"]').fill(SSH_HOST)
     await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
     await page.locator('select').nth(1).selectOption('uploaded_key')
 
@@ -123,7 +123,7 @@ test.describe('SSH Key Upload', () => {
 
     await page.locator('input[placeholder="my-project"]').fill(sessionName)
     await page.locator('select').first().selectOption('ssh')
-    await page.locator('input[placeholder="94.130.141.98"]').fill(SSH_HOST)
+    await page.locator('input[placeholder="192.0.2.1"]').fill(SSH_HOST)
     await page.locator('input[placeholder="ubuntu"]').fill(SSH_USER)
     await page.locator('select').nth(1).selectOption('uploaded_key')
 
