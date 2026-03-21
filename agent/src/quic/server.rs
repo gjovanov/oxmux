@@ -101,6 +101,22 @@ async fn handle_session(
     info!(session = %session_name, "attaching to tmux session");
     tmux_mgr.ensure_session(session_name)?;
 
+    // Set window-size to 'latest' so pane sizes follow the most recently
+    // active client, not the smallest. Without this, control mode clients
+    // at 80x24 cap all pane sizes regardless of resize-pane commands.
+    {
+        let socket = find_tmux_socket();
+        let mut cmd = std::process::Command::new("tmux");
+        if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+        cmd.args(["set-option", "-g", "window-size", "latest"]);
+        let _ = cmd.output();
+        // Also detach old control-mode clients (stale from previous connections)
+        let mut cmd2 = std::process::Command::new("tmux");
+        if let Some(ref s) = socket { cmd2.arg("-S").arg(s); }
+        cmd2.args(["set-option", "-g", "aggressive-resize", "on"]);
+        let _ = cmd2.output();
+    }
+
     // Spawn tmux -CC attach for live output streaming
     let (output_tx, mut output_rx) = mpsc::channel::<(String, Bytes)>(512);
     let ctrl_session_name = session_name.to_string();
