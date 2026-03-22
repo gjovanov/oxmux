@@ -200,23 +200,11 @@ export function useTerminal(
     })
 
     // CRITICAL ORDER: handler → resize → subscribe
-    // Reset terminal on first output to clear any stale state from
-    // buffered control mode output that arrives before SIGWINCH redraw.
-    let firstOutput = true
+    // Agent sends: clear screen + capture-pane (with \r\n) + SIGWINCH
     store.registerPaneHandler(pid, (data: Uint8Array) => {
-      if (firstOutput) {
-        firstOutput = false
-        // Check if this looks like a clear screen or alternate buffer entry
-        // If not, reset first to clear stale buffered output
-        const hasAltScreen = data.length > 2 && data[0] === 0x1b && data[1] === 0x5b
-        if (!hasAltScreen) {
-          t.reset()
-        }
-      }
       t.write(data)
     })
     fitAddon.fit()
-    t.reset() // Clear terminal before any output arrives
     store.sendResize(pid, t.cols, t.rows)
     store.sendSubscribe(pid)
 

@@ -374,44 +374,57 @@ async fn handle_message(
             if is_valid_pane_id(pane) {
                 let socket = find_tmux_socket();
 
-                // 1. Send clear screen to client — wipes any stale content in xterm.js
-                //    (the "[oxmux] connecting..." message, old captures, etc.)
-                let clear = serde_json::json!({
+                // 1. Send clear screen + cursor home to wipe xterm.js
+                // 2. capture-pane with \n→\r\n conversion for proper xterm.js rendering
+                // 3. SIGWINCH to force TUI app to take over rendering going forward
+                let mut clear_data: Vec<u8> = b"\x1b[2J\x1b[H".to_vec();
+
+                // Capture current pane content (visible area only)
+                let mut cmd = std::process::Command::new("tmux");
+                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+                cmd.args(["capture-pane", "-t", pane, "-p"]);  // no -e (plain text, no escapes)
+                if let Ok(output) = cmd.output() {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        // Convert \n to \r\n for xterm.js
+                        for byte in &output.stdout {
+                            if *byte == b'\n' {
+                                clear_data.push(b'\r');
+                            }
+                            clear_data.push(*byte);
+                        }
+                    }
+                }
+
+                let reply = serde_json::json!({
                     "t": "o",
                     "pane": pane,
-                    "data": b"\x1b[2J\x1b[H".to_vec(), // ESC[2J = clear screen, ESC[H = cursor home
+                    "data": clear_data,
                 });
-                if let Ok(encoded) = rmp_serde::to_vec_named(&clear) {
+                if let Ok(encoded) = rmp_serde::to_vec_named(&reply) {
                     let sent_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
                         if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
                             dc.send(&Bytes::from(encoded.clone())).await.is_ok()
                         } else { false }
                     } else { false };
                     if !sent_dc {
-                        let _ = send_msg(send, &clear).await;
+                        let _ = send_msg(send, &reply).await;
                     }
                 }
 
-                // 2. Send SIGWINCH directly to the pane's process.
-                //    This forces TUI apps (Claude Code, vim, htop) to fully redraw
-                //    with proper VT escape sequences. The output arrives via the
-                //    live %output control mode stream.
-                //
-                //    IMPORTANT: Do NOT use resize-window/resize-pane for SIGWINCH —
-                //    that kills the control mode client (tmux -CC detaches on resize).
-                //    Direct `kill -WINCH <pid>` is safe and doesn't affect control mode.
-                let mut cmd = std::process::Command::new("tmux");
-                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["display-message", "-t", pane, "-p", "#{pane_pid}"]);
-                if let Ok(output) = cmd.output() {
+                // Send SIGWINCH to force TUI app to properly redraw with
+                // cursor positioning (capture-pane is a snapshot, SIGWINCH
+                // makes the app take over rendering going forward)
+                let mut cmd2 = std::process::Command::new("tmux");
+                if let Some(ref s) = socket { cmd2.arg("-S").arg(s); }
+                cmd2.args(["display-message", "-t", pane, "-p", "#{pane_pid}"]);
+                if let Ok(output) = cmd2.output() {
                     if output.status.success() {
                         let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if let Ok(pid) = pid_str.parse::<i32>() {
-                            // Send SIGWINCH directly to the process
                             let mut kill_cmd = std::process::Command::new("kill");
                             kill_cmd.args(["-WINCH", &pid.to_string()]);
                             let _ = kill_cmd.output();
-                            info!(pane = %pane, pid, "sent SIGWINCH to pane process");
+                            info!(pane = %pane, pid, "capture-pane + SIGWINCH");
                         }
                     }
                 }
