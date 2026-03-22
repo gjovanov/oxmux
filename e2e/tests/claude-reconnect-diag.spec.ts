@@ -40,12 +40,12 @@ test('diagnose Claude Code reconnect behavior', async ({ page, context }) => {
   console.log('Step 2: Session connected')
 
   // 3. Switch to single view and select pane
-  const singleBtn = page.locator('.toggle-btn', { hasText: 'Single' })
-  if (await singleBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await singleBtn.click()
-  }
+  await page.locator('.toggle-btn', { hasText: 'Single' }).click()
+  await page.waitForTimeout(500)
   await page.locator('.pane-node').first().click()
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 10_000 })
+  await page.waitForTimeout(1000)
+  // Wait for terminal to appear (might take a moment after pane selection)
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 15_000 })
   await page.locator('.terminal-pane').click()
   await page.waitForTimeout(2000)
 
