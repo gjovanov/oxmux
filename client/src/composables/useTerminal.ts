@@ -233,7 +233,8 @@ export function useTerminal(
       store.sendResize(pid, t.cols, t.rows)
     })
 
-    t.write('\r\n\x1b[90m[oxmux] connecting to pane ' + pid + '...\x1b[0m\r\n')
+    // Don't write anything to the terminal — the agent sends a clear screen
+    // followed by SIGWINCH-triggered content from the running app
 
     // Register in global registry
     terminalRegistry.set(pid, {

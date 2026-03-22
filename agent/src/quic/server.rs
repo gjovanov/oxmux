@@ -372,39 +372,38 @@ async fn handle_message(
             info!(pane = %pane, "client subscribed to pane");
 
             if is_valid_pane_id(pane) {
-                // No delay needed — resize handler verifies completion before returning
                 let socket = find_tmux_socket();
 
-                // 1. Capture current pane content (at the now-resized dimensions)
-                let mut cmd = std::process::Command::new("tmux");
-                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["capture-pane", "-t", pane, "-p", "-e"]);
-                if let Ok(output) = cmd.output() {
-                    if output.status.success() && !output.stdout.is_empty() {
-                        let capture = output.stdout;
-                        let reply = serde_json::json!({
-                            "t": "o",
-                            "pane": pane,
-                            "data": capture,
-                        });
-                        if let Ok(encoded) = rmp_serde::to_vec_named(&reply) {
-                            let sent_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
-                                if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                                    dc.send(&Bytes::from(encoded.clone())).await.is_ok()
-                                } else { false }
-                            } else { false };
-                            if !sent_dc {
-                                let _ = send_msg(send, &reply).await;
-                            }
-                        }
+                // 1. Send clear screen to client — wipes any stale content in xterm.js
+                //    (the "[oxmux] connecting..." message, old captures, etc.)
+                let clear = serde_json::json!({
+                    "t": "o",
+                    "pane": pane,
+                    "data": b"\x1b[2J\x1b[H".to_vec(), // ESC[2J = clear screen, ESC[H = cursor home
+                });
+                if let Ok(encoded) = rmp_serde::to_vec_named(&clear) {
+                    let sent_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
+                        if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                            dc.send(&Bytes::from(encoded.clone())).await.is_ok()
+                        } else { false }
+                    } else { false };
+                    if !sent_dc {
+                        let _ = send_msg(send, &clear).await;
                     }
                 }
 
-                // 2. SIGWINCH jiggle — forces TUI apps to fully redraw
-                let mut cmd2 = std::process::Command::new("tmux");
-                if let Some(ref s) = socket { cmd2.arg("-S").arg(s); }
-                cmd2.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
-                if let Ok(output) = cmd2.output() {
+                // 2. SIGWINCH jiggle — forces the running app to fully redraw
+                //    The app (Claude Code, htop, vim, etc.) responds with proper
+                //    VT escape sequences (cursor positioning, colors, etc.) that
+                //    xterm.js can render correctly. This output arrives via the
+                //    live %output control mode stream.
+                //
+                //    NOTE: No capture-pane! capture-pane produces plain text with \n
+                //    line endings, which xterm.js can't render as a TUI screen.
+                let mut cmd = std::process::Command::new("tmux");
+                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+                cmd.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
+                if let Ok(output) = cmd.output() {
                     if output.status.success() {
                         let size_str = String::from_utf8_lossy(&output.stdout);
                         let parts: Vec<&str> = size_str.trim().split_whitespace().collect();
@@ -414,6 +413,7 @@ async fn handle_message(
                                     let _ = tmux_mgr.resize_pane(pane, w - 1, h);
                                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                     let _ = tmux_mgr.resize_pane(pane, w, h);
+                                    info!(pane = %pane, cols = w, rows = h, "SIGWINCH jiggle");
                                 }
                             }
                         }
