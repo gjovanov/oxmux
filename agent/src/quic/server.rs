@@ -135,12 +135,18 @@ async fn handle_session(
     // Channel for DataChannel messages → main event loop (so all msg types are handled)
     let (dc_msg_tx, mut dc_msg_rx) = mpsc::channel::<Vec<u8>>(256);
 
-    // Wrap control mode in a restart loop — it may exit when Claude Code
-    // restores terminal state (alternate screen buffer switch, etc.)
+    // Shared control mode stdin — for sending tmux commands (resize etc.)
+    // through the control mode channel instead of spawning external tmux processes.
+    // This is the same approach the server's SSH transport uses (write_control_command).
+    let ctrl_stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    // Wrap control mode in a restart loop
+    let ctrl_stdin_clone = ctrl_stdin.clone();
     let ctrl_handle = tokio::spawn(async move {
         loop {
             info!(session = %ctrl_session_name, "starting control mode");
-            match run_control_mode(&ctrl_session_name, output_tx.clone()).await {
+            match run_control_mode(&ctrl_session_name, output_tx.clone(), ctrl_stdin_clone.clone()).await {
                 Ok(()) => {
                     info!(session = %ctrl_session_name, "control mode exited, restarting in 100ms");
                 }
@@ -183,7 +189,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -232,7 +238,7 @@ async fn handle_session(
             // Handle messages from WebRTC DataChannel (forwarded via channel)
             dc_data = dc_msg_rx.recv() => {
                 if let Some(data) = dc_data {
-                    if let Err(e) = handle_message(&data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc).await {
+                    if let Err(e) = handle_message(&data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin).await {
                         warn!("DC message error: {}", e);
                     }
                 }
@@ -262,9 +268,11 @@ async fn handle_session(
 }
 
 /// Run tmux -CC attach and parse %output events into the channel.
+/// Returns the control mode stdin writer for sending tmux commands.
 async fn run_control_mode(
     session_name: &str,
     tx: mpsc::Sender<(String, Bytes)>,
+    ctrl_stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
 ) -> Result<()> {
     use tokio::io::AsyncBufReadExt;
 
@@ -284,6 +292,10 @@ async fn run_control_mode(
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("failed to spawn tmux -CC via script")?;
+
+    // Share stdin with the main loop for sending control commands (resize etc.)
+    let stdin = child.stdin.take().context("no stdin")?;
+    *ctrl_stdin.lock().await = Some(stdin);
 
     let stdout = child.stdout.take().context("no stdout")?;
     let reader = tokio::io::BufReader::new(stdout);
@@ -364,6 +376,7 @@ async fn handle_message(
     webrtc_pending_candidates: &Arc<tokio::sync::Mutex<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>>,
     dc_msg_tx: &mpsc::Sender<Vec<u8>>,
     webrtc_dc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+    ctrl_stdin: &Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
     let t = get_str(&msg, "t");
@@ -444,30 +457,25 @@ async fn handle_message(
             let cols = get_u64(&msg, "cols") as u16;
             let rows = get_u64(&msg, "rows") as u16;
             if is_valid_pane_id(pane) && cols > 0 && rows > 0 {
-                info!(pane = %pane, cols, rows, "resize pane");
-                match tmux_mgr.resize_pane(pane, cols, rows) {
-                    Ok(_) => {
-                        // Verify resize took effect (poll up to 500ms)
-                        let socket = find_tmux_socket();
-                        for _ in 0..10 {
-                            let mut cmd = std::process::Command::new("tmux");
-                            if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                            cmd.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
-                            if let Ok(output) = cmd.output() {
-                                let s = String::from_utf8_lossy(&output.stdout);
-                                let parts: Vec<&str> = s.trim().split_whitespace().collect();
-                                if parts.len() == 2 {
-                                    if let (Ok(w), Ok(h)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                                        if w == cols && h == rows {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
+                info!(pane = %pane, cols, rows, "resize via control mode");
+                // Send resize through control mode stdin (safe, doesn't kill control mode).
+                // This is the same approach the server's SSH transport uses.
+                use tokio::io::AsyncWriteExt;
+                let mut stdin_guard = ctrl_stdin.lock().await;
+                if let Some(ref mut stdin) = *stdin_guard {
+                    let win_cmd = format!("resize-window -t {} -x {} -y {}\n", pane, cols, rows);
+                    let pane_cmd = format!("resize-pane -t {} -x {} -y {}\n", pane, cols, rows);
+                    if let Err(e) = stdin.write_all(win_cmd.as_bytes()).await {
+                        warn!(error = %e, "failed to write resize-window to control mode");
                     }
-                    Err(e) => warn!(pane = %pane, error = %e, "resize failed"),
+                    if let Err(e) = stdin.write_all(pane_cmd.as_bytes()).await {
+                        warn!(error = %e, "failed to write resize-pane to control mode");
+                    }
+                    let _ = stdin.flush().await;
+                } else {
+                    // Fallback: external command (may briefly kill control mode)
+                    warn!("no control mode stdin, falling back to external resize");
+                    let _ = tmux_mgr.resize_pane(pane, cols, rows);
                 }
             }
         }
