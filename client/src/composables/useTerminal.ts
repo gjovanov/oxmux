@@ -116,17 +116,10 @@ export function useTerminal(
       })
       existing.resizeObserver.observe(containerRef.value)
 
-      // Fit to new container + force SIGWINCH for TUI apps
+      // Fit to new container and send resize
       requestAnimationFrame(() => {
         existing.fitAddon.fit()
-        const cols = existing.terminal.cols
-        const rows = existing.terminal.rows
-        if (cols > 1) {
-          store.sendResize(pid, cols - 1, rows)
-          setTimeout(() => store.sendResize(pid, cols, rows), 50)
-        } else {
-          store.sendResize(pid, cols, rows)
-        }
+        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
       })
 
       term.value = existing.terminal

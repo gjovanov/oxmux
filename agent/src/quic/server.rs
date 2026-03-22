@@ -392,30 +392,26 @@ async fn handle_message(
                     }
                 }
 
-                // 2. SIGWINCH jiggle — forces the running app to fully redraw
-                //    The app (Claude Code, htop, vim, etc.) responds with proper
-                //    VT escape sequences (cursor positioning, colors, etc.) that
-                //    xterm.js can render correctly. This output arrives via the
+                // 2. Send SIGWINCH directly to the pane's process.
+                //    This forces TUI apps (Claude Code, vim, htop) to fully redraw
+                //    with proper VT escape sequences. The output arrives via the
                 //    live %output control mode stream.
                 //
-                //    NOTE: No capture-pane! capture-pane produces plain text with \n
-                //    line endings, which xterm.js can't render as a TUI screen.
+                //    IMPORTANT: Do NOT use resize-window/resize-pane for SIGWINCH —
+                //    that kills the control mode client (tmux -CC detaches on resize).
+                //    Direct `kill -WINCH <pid>` is safe and doesn't affect control mode.
                 let mut cmd = std::process::Command::new("tmux");
                 if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
+                cmd.args(["display-message", "-t", pane, "-p", "#{pane_pid}"]);
                 if let Ok(output) = cmd.output() {
                     if output.status.success() {
-                        let size_str = String::from_utf8_lossy(&output.stdout);
-                        let parts: Vec<&str> = size_str.trim().split_whitespace().collect();
-                        if parts.len() == 2 {
-                            if let (Ok(w), Ok(h)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                                if w > 1 {
-                                    let _ = tmux_mgr.resize_pane(pane, w - 1, h);
-                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                    let _ = tmux_mgr.resize_pane(pane, w, h);
-                                    info!(pane = %pane, cols = w, rows = h, "SIGWINCH jiggle");
-                                }
-                            }
+                        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if let Ok(pid) = pid_str.parse::<i32>() {
+                            // Send SIGWINCH directly to the process
+                            let mut kill_cmd = std::process::Command::new("kill");
+                            kill_cmd.args(["-WINCH", &pid.to_string()]);
+                            let _ = kill_cmd.output();
+                            info!(pane = %pane, pid, "sent SIGWINCH to pane process");
                         }
                     }
                 }
