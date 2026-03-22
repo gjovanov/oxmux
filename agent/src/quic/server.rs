@@ -372,9 +372,7 @@ async fn handle_message(
             info!(pane = %pane, "client subscribed to pane");
 
             if is_valid_pane_id(pane) {
-                // Wait for preceding resize to propagate through tmux
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
+                // No delay needed — resize handler verifies completion before returning
                 let socket = find_tmux_socket();
 
                 // 1. Capture current pane content (at the now-resized dimensions)
@@ -437,7 +435,27 @@ async fn handle_message(
             if is_valid_pane_id(pane) && cols > 0 && rows > 0 {
                 info!(pane = %pane, cols, rows, "resize pane");
                 match tmux_mgr.resize_pane(pane, cols, rows) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // Verify resize took effect (poll up to 500ms)
+                        let socket = find_tmux_socket();
+                        for _ in 0..10 {
+                            let mut cmd = std::process::Command::new("tmux");
+                            if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
+                            cmd.args(["display-message", "-t", pane, "-p", "#{pane_width} #{pane_height}"]);
+                            if let Ok(output) = cmd.output() {
+                                let s = String::from_utf8_lossy(&output.stdout);
+                                let parts: Vec<&str> = s.trim().split_whitespace().collect();
+                                if parts.len() == 2 {
+                                    if let (Ok(w), Ok(h)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
+                                        if w == cols && h == rows {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
                     Err(e) => warn!(pane = %pane, error = %e, "resize failed"),
                 }
             }
