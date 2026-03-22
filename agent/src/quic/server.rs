@@ -116,6 +116,20 @@ async fn handle_session(
         let _ = cmd2.output();
     }
 
+    // Pre-size the window to 500x200 so resize-pane can freely resize within it.
+    // This is done ONCE before control mode starts, because resize-window
+    // kills control mode clients. After this, only resize-pane is used.
+    {
+        let panes = tmux_mgr.list_panes(session_name).unwrap_or_default();
+        if let Some(first_pane) = panes.first() {
+            if let Err(e) = tmux_mgr.maximize_window(&first_pane.pane_id) {
+                warn!(error = %e, "failed to maximize window");
+            } else {
+                info!("window maximized to 500x200 for session {}", session_name);
+            }
+        }
+    }
+
     // Spawn tmux -CC attach for live output streaming
     let (output_tx, mut output_rx) = mpsc::channel::<(String, Bytes)>(512);
     let ctrl_session_name = session_name.to_string();

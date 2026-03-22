@@ -338,7 +338,8 @@ impl Transport for SshTransport {
         let create_cmd = format!(
             "tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -x 80 -y 24; \
              tmux set-option -g window-size manual 2>/dev/null; \
-             tmux set-option -g aggressive-resize on 2>/dev/null",
+             tmux set-option -g aggressive-resize on 2>/dev/null; \
+             tmux resize-window -t {name} -x 500 -y 200 2>/dev/null || true",
             name = self.session_name
         );
         Self::exec_command(&handle, &create_cmd).await?;
@@ -501,10 +502,10 @@ impl Transport for SshTransport {
     }
 
     async fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> Result<()> {
-        info!(pane = %pane_id, cols, rows, "resizing window+pane");
-        // Resize window first (pane can't exceed window dimensions)
-        let win_cmd = format!("resize-window -t {} -x {} -y {}", pane_id, cols, rows);
-        self.write_control_command(&win_cmd).await?;
+        info!(pane = %pane_id, cols, rows, "resizing pane");
+        // Only resize-pane, not resize-window.
+        // resize-window can kill control mode clients on the agent side.
+        // Windows are pre-sized to 500x200 at session creation.
         let pane_cmd = format!("resize-pane -t {} -x {} -y {}", pane_id, cols, rows);
         self.write_control_command(&pane_cmd).await
     }
