@@ -116,20 +116,6 @@ async fn handle_session(
         let _ = cmd2.output();
     }
 
-    // Pre-size the window to 500x200 so resize-pane can freely resize within it.
-    // This is done ONCE before control mode starts, because resize-window
-    // kills control mode clients. After this, only resize-pane is used.
-    {
-        let panes = tmux_mgr.list_panes(session_name).unwrap_or_default();
-        if let Some(first_pane) = panes.first() {
-            if let Err(e) = tmux_mgr.maximize_window(&first_pane.pane_id) {
-                warn!(error = %e, "failed to maximize window");
-            } else {
-                info!("window maximized to 500x200 for session {}", session_name);
-            }
-        }
-    }
-
     // Spawn tmux -CC attach for live output streaming
     let (output_tx, mut output_rx) = mpsc::channel::<(String, Bytes)>(512);
     let ctrl_session_name = session_name.to_string();
@@ -156,13 +142,15 @@ async fn handle_session(
             info!(session = %ctrl_session_name, "starting control mode");
             match run_control_mode(&ctrl_session_name, output_tx.clone()).await {
                 Ok(()) => {
-                    info!(session = %ctrl_session_name, "control mode exited cleanly, restarting in 1s");
+                    info!(session = %ctrl_session_name, "control mode exited, restarting in 100ms");
                 }
                 Err(e) => {
-                    warn!(session = %ctrl_session_name, error = %e, "control mode error, restarting in 1s");
+                    warn!(session = %ctrl_session_name, error = %e, "control mode error, restarting in 100ms");
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Fast restart — resize-window causes brief control mode detach,
+            // need to reattach quickly to catch SIGWINCH redraw output
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     });
 

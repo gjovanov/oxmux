@@ -125,27 +125,21 @@ impl TmuxManager {
     }
 
     pub fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> Result<()> {
-        // Only resize-pane, NOT resize-window.
-        // resize-window kills control mode clients (tmux -CC detaches on window resize).
-        // The window is pre-sized to 500x200 at session creation so pane can freely resize.
+        // Must resize BOTH window and pane — pane can't be smaller than window.
+        // Uses external tmux commands (not control mode) which may cause
+        // control mode to briefly detach, but the restart loop handles this.
+        Self::tmux_cmd()
+            .args(["resize-window", "-t", pane_id, "-x", &cols.to_string(), "-y", &rows.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to run tmux resize-window")?;
         Self::tmux_cmd()
             .args(["resize-pane", "-t", pane_id, "-x", &cols.to_string(), "-y", &rows.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .context("failed to run tmux resize-pane")?;
-        Ok(())
-    }
-
-    /// Set window to maximum size (call once at session setup).
-    /// With window-size=manual, the window stays at this size permanently.
-    pub fn maximize_window(&self, pane_id: &str) -> Result<()> {
-        Self::tmux_cmd()
-            .args(["resize-window", "-t", pane_id, "-x", "500", "-y", "200"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("failed to run tmux resize-window")?;
         Ok(())
     }
 
