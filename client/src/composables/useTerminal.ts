@@ -116,12 +116,14 @@ export function useTerminal(
       })
       existing.resizeObserver.observe(containerRef.value)
 
-      // Fit to new container and send resize + SIGWINCH
+      // Fit to new container and send resize.
+      // DO NOT sendSubscribe here — the agent's sub handler sends capture-pane
+      // (plain text format) which corrupts Claude Code's TUI rendering.
+      // The resize alone triggers SIGWINCH via control mode stdin, which is
+      // sufficient for Claude Code to redraw at the new dimensions.
       requestAnimationFrame(() => {
         existing.fitAddon.fit()
         store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
-        // Re-subscribe to trigger SIGWINCH for correct rendering at new size
-        store.sendSubscribe(pid)
       })
 
       term.value = existing.terminal
