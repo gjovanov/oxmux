@@ -266,11 +266,13 @@ export function useTerminal(
     const entry = terminalRegistry.get(pid)
     if (entry) {
       entry.refCount--
-      entry.resizeObserver?.disconnect()
-      entry.resizeObserver = null
-      // Don't dispose — terminal stays in registry for reuse
-      // Only dispose if refCount drops to 0 AND a timeout passes
-      // (in case a new component mounts for the same pane)
+      // Only disconnect resizeObserver if no other component is using this terminal.
+      // If refCount > 0, another component already reattached and created a new observer.
+      // Disconnecting here would kill the NEW observer.
+      if (entry.refCount <= 0) {
+        entry.resizeObserver?.disconnect()
+        entry.resizeObserver = null
+      }
       if (entry.refCount <= 0) {
         setTimeout(() => {
           const current = terminalRegistry.get(pid)
