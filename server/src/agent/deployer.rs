@@ -140,6 +140,7 @@ After=network.target
 
 [Service]
 Type=simple
+User={user}
 Environment=AGENT_QUIC_PORT={quic_port}
 Environment=OXMUX_AGENT_SECRET={agent_secret}
 Environment=COTURN_AUTH_SECRET={coturn_secret}
