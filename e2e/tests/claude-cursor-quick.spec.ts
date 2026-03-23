@@ -73,10 +73,21 @@ test('Claude Code prompt visible after WebRTC P2P connect', async ({ page, conte
   console.log('Initial content (last 200):', content.slice(-200))
   await page.screenshot({ path: 'e2e/screenshots/cursor-quick-01-initial.png' })
 
-  // Start Claude Code if not running
-  if (!content.includes('❯') || !content.includes('bypass permissions')) {
-    console.log('Claude not running, starting it...')
-    await page.keyboard.type('bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions --continue', { delay: 10 })
+  // Exit any running Claude session first
+  console.log('Exiting any running Claude session...')
+  await page.keyboard.down('Control')
+  await page.keyboard.press('d')
+  await page.keyboard.up('Control')
+  await page.waitForTimeout(2000)
+  await page.keyboard.down('Control')
+  await page.keyboard.press('d')
+  await page.keyboard.up('Control')
+  await page.waitForTimeout(3000)
+
+  // Start FRESH Claude Code (no --continue to avoid long history)
+  {
+    console.log('Starting fresh Claude Code...')
+    await page.keyboard.type('bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions', { delay: 10 })
     await page.keyboard.press('Enter')
 
     // Wait for Claude to render (up to 60s)

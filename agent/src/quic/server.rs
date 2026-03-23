@@ -410,13 +410,16 @@ async fn handle_message(
                     }
                 }
 
-                // 2. After a brief delay, send Escape key to the pane.
-                // This nudges TUI apps like Claude Code to redraw at the
-                // correct scroll position (showing the prompt at the bottom).
-                // Without this, Claude Code may show a stale scroll position
-                // after SIGWINCH (top of conversation instead of prompt).
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                send_tmux_input(pane, &[0x1b]); // ESC key
+                // 2. After a brief delay, send space+backspace to the pane.
+                // This forces Claude Code to focus its input prompt, which
+                // scrolls the conversation to show the ❯ prompt at the bottom.
+                // The backspace removes the space, leaving the prompt clean.
+                // Without this, Claude Code may show the top of conversation
+                // after SIGWINCH instead of the bottom (prompt area).
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                send_tmux_input(pane, &[0x20]); // space
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                send_tmux_input(pane, &[0x7f]); // backspace
             }
         }
 
