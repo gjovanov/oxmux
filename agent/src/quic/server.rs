@@ -11,6 +11,15 @@ use wtransport::{Endpoint, Identity, ServerConfig};
 
 use crate::tmux_manager::TmuxManager;
 
+/// Pane output message — uses Bytes for data so rmp_serde encodes it as
+/// MessagePack binary (bin type), matching the server's ServerMsg::Output.
+#[derive(serde::Serialize)]
+struct PaneOutput {
+    t: &'static str,
+    pane: String,
+    data: Bytes,
+}
+
 pub async fn run(
     port: u16,
     cert_path: &str,
@@ -163,6 +172,19 @@ async fn handle_session(
     // Message loop
     let mut stream_buf = Vec::new();
     let mut read_buf = vec![0u8; 65536];
+    // Track subscribed panes — only forward output for panes the client subscribed to.
+    // This matches the server's behavior (pane_subs HashMap). Without this, the agent
+    // sends ALL control mode output immediately (including stale buffered TUI renders
+    // from before the client connected), which overwrites the terminal with old content
+    // at the wrong scroll position.
+    let mut subscribed_panes = std::collections::HashSet::<String>::new();
+    // Track last-sent dimensions per pane to avoid redundant SIGWINCH.
+    // When dimensions change, tmux naturally sends SIGWINCH (one signal).
+    // When dimensions DON'T change (reconnect/view switch at same size),
+    // we force SIGWINCH via run-shell. Without tracking, every resize
+    // triggers run-shell SIGWINCH ON TOP of the natural one — double
+    // SIGWINCHs during rapid sidebar drag corrupt Claude's scroll state.
+    let mut pane_dimensions = std::collections::HashMap::<String, (u16, u16)>::new();
 
     // Send initial pane list
     let panes = tmux_mgr.list_panes(session_name).unwrap_or_default();
@@ -189,7 +211,7 @@ async fn handle_session(
             let msg_data = stream_buf[4..4 + msg_len].to_vec();
             stream_buf.drain(..4 + msg_len);
 
-            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin).await {
+            if let Err(e) = handle_message(&msg_data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin, &mut subscribed_panes, &mut pane_dimensions).await {
                 warn!("Message error: {}", e);
             }
         }
@@ -200,18 +222,20 @@ async fn handle_session(
             // Forward control mode output to client (QUIC or WebRTC DataChannel)
             output = output_rx.recv() => {
                 match output {
-                    Some((pane_id, data)) => {
-                        let reply = serde_json::json!({
-                            "t": "o",
-                            "pane": pane_id,
-                            "data": data.to_vec(),
-                        });
+                    Some((pane_id, data)) if subscribed_panes.contains(&pane_id) => {
+                        // CRITICAL: encode data as MessagePack binary (bin type), NOT as
+                        // an array of integers. Using serde_json::json! with data.to_vec()
+                        // serializes Vec<u8> as a JSON array → rmp_serde encodes as MsgPack
+                        // array → client gets Array<number> instead of Uint8Array → xterm.js
+                        // cursor positioning breaks. PaneOutput uses Bytes which serializes
+                        // as MsgPack bin via serde_bytes, matching the server's encoding.
+                        let reply = PaneOutput { t: "o", pane: pane_id, data };
+                        let encoded = rmp_serde::to_vec_named(&reply).unwrap_or_default();
 
                         // Try DataChannel first (WebRTC P2P), fall back to QUIC stream
                         let sent_via_dc = if let Some(dc) = webrtc_dc.lock().await.as_ref() {
                             if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                                let encoded = rmp_serde::to_vec_named(&reply).unwrap_or_default();
-                                dc.send(&Bytes::from(encoded)).await.is_ok()
+                                dc.send(&Bytes::from(encoded.clone())).await.is_ok()
                             } else {
                                 false
                             }
@@ -220,10 +244,14 @@ async fn handle_session(
                         };
 
                         if !sent_via_dc {
-                            if send_msg(&mut send, &reply).await.is_err() {
+                            if send_raw(&mut send, &encoded).await.is_err() {
                                 break;
                             }
                         }
+                    }
+                    Some((_pane_id, _data)) => {
+                        // Output for unsubscribed pane — discard silently.
+                        // Client hasn't sent 'sub' for this pane yet.
                     }
                     None => {
                         // Control mode exited (e.g., Claude Code exit restores terminal).
@@ -238,7 +266,7 @@ async fn handle_session(
             // Handle messages from WebRTC DataChannel (forwarded via channel)
             dc_data = dc_msg_rx.recv() => {
                 if let Some(data) = dc_data {
-                    if let Err(e) = handle_message(&data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin).await {
+                    if let Err(e) = handle_message(&data, &tmux_mgr, &mut send, &webrtc_pc, &webrtc_remote_set, &webrtc_pending_candidates, &dc_msg_tx, &webrtc_dc, &ctrl_stdin, &mut subscribed_panes, &mut pane_dimensions).await {
                         warn!("DC message error: {}", e);
                     }
                 }
@@ -283,10 +311,13 @@ async fn run_control_mode(
     } else {
         format!("tmux -CC attach -t {}", session_name)
     };
+    // Use `script` to provide a PTY (tmux -CC requires a terminal).
+    // trap '' WINCH prevents the shell from exiting on SIGWINCH when
+    // resize-window changes the tmux window size.
+    let wrapper = format!("trap '' WINCH; {}", tmux_cmd);
     info!(cmd = %tmux_cmd, "starting control mode");
-
     let mut child = tokio::process::Command::new("script")
-        .args(["-q", "-c", &tmux_cmd, "/dev/null"])
+        .args(["-q", "-c", &wrapper, "/dev/null"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -361,9 +392,15 @@ fn decode_tmux_output(s: &str) -> Vec<u8> {
 /// Send a length-prefixed msgpack message.
 async fn send_msg(send: &mut wtransport::SendStream, msg: &serde_json::Value) -> Result<()> {
     let encoded = rmp_serde::to_vec_named(msg)?;
+    send_raw(send, &encoded).await
+}
+
+/// Send pre-encoded length-prefixed bytes.
+async fn send_raw(send: &mut wtransport::SendStream, encoded: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
     let len = (encoded.len() as u32).to_be_bytes();
     send.write_all(&len).await?;
-    send.write_all(&encoded).await?;
+    send.write_all(encoded).await?;
     Ok(())
 }
 
@@ -377,6 +414,8 @@ async fn handle_message(
     dc_msg_tx: &mpsc::Sender<Vec<u8>>,
     webrtc_dc: &Arc<tokio::sync::Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
     ctrl_stdin: &Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+    subscribed_panes: &mut std::collections::HashSet<String>,
+    pane_dimensions: &mut std::collections::HashMap<String, (u16, u16)>,
 ) -> Result<()> {
     let msg: rmpv::Value = rmpv::decode::read_value(&mut &data[..])?;
     let t = get_str(&msg, "t");
@@ -384,49 +423,29 @@ async fn handle_message(
     match t {
         "sub" => {
             let pane = get_str(&msg, "pane");
-            info!(pane = %pane, "client subscribed to pane");
-
             if is_valid_pane_id(pane) {
-                let socket = find_tmux_socket();
+                info!(pane = %pane, "client subscribed to pane");
+                subscribed_panes.insert(pane.to_string());
+                // No SIGWINCH here — the client sends resize after subscribe,
+                // and the resize handler forces SIGWINCH at the CORRECT size.
+                // Sending SIGWINCH here would cause Claude to redraw at the OLD
+                // tmux dimensions (before resize arrives), producing a conflicting
+                // double-redraw that shows wrong content.
+            }
+        }
 
-                // Send SIGWINCH ONLY — no capture-pane.
-                // capture-pane produces plain text that corrupts TUI rendering.
-                // SIGWINCH forces Claude Code to fully redraw with proper VT
-                // escape sequences (cursor positioning, alternate screen buffer).
-                // The redraw output arrives through the control mode %output stream.
-                // 1. SIGWINCH to force the running app to redraw
-                let mut cmd = std::process::Command::new("tmux");
-                if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-                cmd.args(["display-message", "-t", pane, "-p", "#{pane_pid}"]);
-                if let Ok(output) = cmd.output() {
-                    if output.status.success() {
-                        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if let Ok(pid) = pid_str.parse::<i32>() {
-                            let mut kill_cmd = std::process::Command::new("kill");
-                            kill_cmd.args(["-WINCH", &pid.to_string()]);
-                            let _ = kill_cmd.output();
-                            info!(pane = %pane, pid, "SIGWINCH on subscribe");
-                        }
-                    }
-                }
-
-                // 2. After a brief delay, send space+backspace to the pane.
-                // This forces Claude Code to focus its input prompt, which
-                // scrolls the conversation to show the ❯ prompt at the bottom.
-                // The backspace removes the space, leaving the prompt clean.
-                // Without this, Claude Code may show the top of conversation
-                // after SIGWINCH instead of the bottom (prompt area).
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                send_tmux_input(pane, &[0x20]); // space
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                send_tmux_input(pane, &[0x7f]); // backspace
+        "unsub" => {
+            let pane = get_str(&msg, "pane");
+            if is_valid_pane_id(pane) {
+                info!(pane = %pane, "client unsubscribed from pane");
+                subscribed_panes.remove(pane);
             }
         }
 
         "i" => {
             let pane = get_str(&msg, "pane");
             let bytes = get_bytes(&msg, "data");
-            send_tmux_input(pane, &bytes);
+            send_tmux_input(pane, &bytes, ctrl_stdin).await;
         }
 
         "r" => {
@@ -434,25 +453,40 @@ async fn handle_message(
             let cols = get_u64(&msg, "cols") as u16;
             let rows = get_u64(&msg, "rows") as u16;
             if is_valid_pane_id(pane) && cols > 0 && rows > 0 {
-                info!(pane = %pane, cols, rows, "resize via control mode");
-                // Send resize through control mode stdin (safe, doesn't kill control mode).
-                // This is the same approach the server's SSH transport uses.
-                use tokio::io::AsyncWriteExt;
-                let mut stdin_guard = ctrl_stdin.lock().await;
-                if let Some(ref mut stdin) = *stdin_guard {
-                    let win_cmd = format!("resize-window -t {} -x {} -y {}\n", pane, cols, rows);
-                    let pane_cmd = format!("resize-pane -t {} -x {} -y {}\n", pane, cols, rows);
-                    if let Err(e) = stdin.write_all(win_cmd.as_bytes()).await {
-                        warn!(error = %e, "failed to write resize-window to control mode");
-                    }
-                    if let Err(e) = stdin.write_all(pane_cmd.as_bytes()).await {
-                        warn!(error = %e, "failed to write resize-pane to control mode");
-                    }
-                    let _ = stdin.flush().await;
+                let dims_changed = pane_dimensions.get(pane) != Some(&(cols, rows));
+                pane_dimensions.insert(pane.to_string(), (cols, rows));
+
+                // When dimensions CHANGE: resize-window + resize-pane only.
+                // tmux sends exactly ONE natural SIGWINCH. No forced SIGWINCH,
+                // because double-SIGWINCH during rapid sidebar drag corrupts
+                // Claude Code's internal scroll state (renders from middle).
+                //
+                // When dimensions DON'T change (reconnect/view switch at same
+                // size): force SIGWINCH via run-shell so Claude redraws. Without
+                // this, tmux sends no SIGWINCH and the terminal stays empty.
+                let cmd = if dims_changed {
+                    info!(pane = %pane, cols, rows, "resize (dims changed, natural SIGWINCH)");
+                    format!(
+                        "resize-window -t {} -x {} -y {}\nresize-pane -t {} -x {} -y {}\n",
+                        pane, cols, rows, pane, cols, rows
+                    )
                 } else {
-                    // Fallback: external command (may briefly kill control mode)
-                    warn!("no control mode stdin, falling back to external resize");
-                    let _ = tmux_mgr.resize_pane(pane, cols, rows);
+                    info!(pane = %pane, cols, rows, "resize (same dims, forcing SIGWINCH)");
+                    format!(
+                        "resize-window -t {} -x {} -y {}\nresize-pane -t {} -x {} -y {}\nrun-shell -t {} \"kill -WINCH #{{pane_pid}}\"\n",
+                        pane, cols, rows, pane, cols, rows, pane
+                    )
+                };
+                let mut stdin_lock = ctrl_stdin.lock().await;
+                if let Some(ref mut stdin) = *stdin_lock {
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(e) = stdin.write_all(cmd.as_bytes()).await {
+                        warn!(error = %e, "failed to write resize to control mode stdin");
+                    } else if let Err(e) = stdin.flush().await {
+                        warn!(error = %e, "failed to flush resize to control mode stdin");
+                    }
+                } else {
+                    warn!("control mode stdin not available for resize");
                 }
             }
         }
@@ -752,19 +786,40 @@ fn is_valid_pane_id(pane: &str) -> bool {
     pane.starts_with('%') && pane.len() > 1 && pane[1..].chars().all(|c| c.is_ascii_digit())
 }
 
-/// Send input to a tmux pane via send-keys -H.
-/// Each hex byte must be a separate argument: `tmux send-keys -H 1b 5b 41`
-fn send_tmux_input(pane: &str, data: &[u8]) {
+/// Send input to a tmux pane via the control-mode stdin pipe.
+/// Writes `send-keys -t <pane> -H <hex hex ...>\n` — identical wire format to
+/// the server's SSH transport (server/src/session/ssh_transport.rs send_input).
+/// Async + non-blocking: never spawns a subprocess. Critical for performance
+/// because the previous `std::process::Command::new("tmux").output()` call
+/// synchronously blocked the tokio event loop for 5-10ms per keystroke,
+/// starving the output forwarder and causing typing lag + scroll corruption.
+async fn send_tmux_input(
+    pane: &str,
+    data: &[u8],
+    ctrl_stdin: &Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+) {
     if data.is_empty() || !is_valid_pane_id(pane) { return; }
-    let socket = find_tmux_socket();
-    let mut cmd = std::process::Command::new("tmux");
-    if let Some(ref s) = socket { cmd.arg("-S").arg(s); }
-    cmd.args(["send-keys", "-t", pane, "-H"]);
-    // Each hex byte as a separate argument (tmux -H requires this)
+    let mut cmd = String::with_capacity(24 + data.len() * 3);
+    cmd.push_str("send-keys -t ");
+    cmd.push_str(pane);
+    cmd.push_str(" -H");
     for byte in data {
-        cmd.arg(format!("{:02x}", byte));
+        use std::fmt::Write;
+        let _ = write!(cmd, " {:02x}", byte);
     }
-    let _ = cmd.output();
+    cmd.push('\n');
+
+    let mut stdin_lock = ctrl_stdin.lock().await;
+    if let Some(ref mut stdin) = *stdin_lock {
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = stdin.write_all(cmd.as_bytes()).await {
+            warn!(error = %e, "failed to write input to control mode stdin");
+        } else if let Err(e) = stdin.flush().await {
+            warn!(error = %e, "failed to flush input to control mode stdin");
+        }
+    } else {
+        warn!("control mode stdin not available for input");
+    }
 }
 
 fn get_str<'a>(v: &'a rmpv::Value, key: &str) -> &'a str {

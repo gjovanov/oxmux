@@ -406,12 +406,14 @@ export const useTmuxStore = defineStore('tmux', () => {
     for (const qid of paneHandlers.keys()) {
       const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
       if (sid === sessionId) {
-        // Resize FIRST, then subscribe (so capture-pane uses correct size)
+        // Subscribe FIRST, then resize — agent must track the pane before
+        // the resize triggers SIGWINCH redraw data, otherwise the output
+        // is discarded by the agent's subscribed_panes check.
+        p2p.send({ t: 'sub', pane: paneId })
         const size = getTerminalSize(qid)
         if (size && size.cols > 0 && size.rows > 0) {
           p2p.send({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
         }
-        p2p.send({ t: 'sub', pane: paneId })
       }
     }
   }
@@ -423,12 +425,12 @@ export const useTmuxStore = defineStore('tmux', () => {
       const { sessionId: sid, paneId } = parseQualifiedPaneId(qid)
       if (sid === sessionId) {
         console.log(`[oxmux] re-subscribing pane ${paneId} via WS`)
-        // Resize FIRST, then subscribe
+        // Subscribe FIRST, then resize
+        wsSend({ t: 'sub', pane: paneId })
         const size = getTerminalSize(qid)
         if (size && size.cols > 0 && size.rows > 0) {
           wsSend({ t: 'r', pane: paneId, cols: size.cols, rows: size.rows })
         }
-        wsSend({ t: 'sub', pane: paneId })
         // Reset terminal to clear any partial UTF-8 from the old transport
         resetTerminal(qid)
       }

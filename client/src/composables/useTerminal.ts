@@ -32,6 +32,11 @@ interface TerminalEntry {
   resizeObserver: ResizeObserver | null
   cleanupFns: (() => void)[]
   refCount: number // how many components are using this terminal
+  lastSentCols: number
+  lastSentRows: number
+  resizeSettling: boolean // true while waiting for SIGWINCH redraw data after resize
+  resizeIdleTimer: ReturnType<typeof setTimeout> | undefined
+  reattachGuard: boolean // suppress ResizeObserver during view switch (VS Code approach)
 }
 
 const terminalRegistry = new Map<string, TerminalEntry>()
@@ -41,6 +46,7 @@ function disposeEntry(paneId: string) {
   const entry = terminalRegistry.get(paneId)
   if (!entry) return
 
+  clearTimeout(entry.resizeIdleTimer)
   entry.resizeObserver?.disconnect()
   for (const fn of entry.cleanupFns) fn()
   const store = useTmuxStore()
@@ -75,6 +81,16 @@ export function disposeAllTerminals() {
   }
 }
 
+/** Send resize only if terminal dimensions actually changed */
+function sendResizeIfChanged(entry: TerminalEntry, store: ReturnType<typeof useTmuxStore>): boolean {
+  const { cols, rows } = entry.terminal
+  if (cols === entry.lastSentCols && rows === entry.lastSentRows) return false
+  entry.lastSentCols = cols
+  entry.lastSentRows = rows
+  store.sendResize(entry.paneId, cols, rows)
+  return true
+}
+
 export function useTerminal(
   paneId: Ref<string>,
   containerRef: Ref<HTMLElement | null>,
@@ -105,25 +121,44 @@ export function useTerminal(
         existing.attachedTo = containerRef.value
       }
 
-      // Re-setup resize observer on new container
+      // ResizeObserver for subsequent size changes (sidebar drag, browser resize)
       let resizeTimer: ReturnType<typeof setTimeout>
       existing.resizeObserver = new ResizeObserver(() => {
         clearTimeout(resizeTimer)
         resizeTimer = setTimeout(() => {
           existing.fitAddon.fit()
-          store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+          if (sendResizeIfChanged(existing, store)) {
+            existing.resizeSettling = true
+            clearTimeout(existing.resizeIdleTimer)
+            existing.resizeIdleTimer = setTimeout(() => {
+              existing.resizeSettling = false
+            }, 2000)
+          }
         }, 50)
       })
       existing.resizeObserver.observe(containerRef.value)
 
-      // Fit to new container and send resize.
-      // DO NOT sendSubscribe here — the agent's sub handler sends capture-pane
-      // (plain text format) which corrupts Claude Code's TUI rendering.
-      // The resize alone triggers SIGWINCH via control mode stdin, which is
-      // sufficient for Claude Code to redraw at the new dimensions.
+      // After DOM settles, re-subscribe + resize to force SIGWINCH redraw.
+      // Re-subscribe triggers the agent to send SIGWINCH (via run-shell),
+      // ensuring Claude Code redraws its TUI at the ❯ prompt — even when
+      // terminal dimensions haven't changed between views.
+      // For the server path, re-subscribe creates a fresh broadcast receiver.
       requestAnimationFrame(() => {
         existing.fitAddon.fit()
-        store.sendResize(pid, existing.terminal.cols, existing.terminal.rows)
+        // Subscribe first (agent registers pane + fires SIGWINCH)
+        store.sendSubscribe(pid)
+        // Always send resize (bypass dedup) — if dimensions differ from
+        // last resize, tmux sends a natural SIGWINCH at the new size
+        const { cols, rows } = existing.terminal
+        existing.lastSentCols = cols
+        existing.lastSentRows = rows
+        store.sendResize(pid, cols, rows)
+        // Enable auto-scroll for SIGWINCH redraw data
+        existing.resizeSettling = true
+        clearTimeout(existing.resizeIdleTimer)
+        existing.resizeIdleTimer = setTimeout(() => {
+          existing.resizeSettling = false
+        }, 2000)
       })
 
       term.value = existing.terminal
@@ -201,22 +236,43 @@ export function useTerminal(
       store.sendInput(pid, Uint8Array.from(data, c => c.charCodeAt(0)))
     })
 
-    // CRITICAL ORDER: handler → resize → subscribe
-    // Agent sends: clear screen + capture-pane (with \r\n) + SIGWINCH
+    // CRITICAL ORDER: handler → subscribe → resize
+    // Subscribe MUST come before resize so the agent's subscribed_panes set
+    // is populated before the resize-triggered SIGWINCH redraw data arrives.
+    // Without this, the agent discards the initial redraw output.
     store.registerPaneHandler(pid, (data: Uint8Array) => {
       t.write(data)
+      // During resize settling, keep the viewport pinned to the bottom
+      // so multi-chunk SIGWINCH redraws remain anchored at the ❯ prompt.
+      const entry = terminalRegistry.get(pid)
+      if (entry?.resizeSettling) {
+        t.scrollToBottom()
+        clearTimeout(entry.resizeIdleTimer)
+        entry.resizeIdleTimer = setTimeout(() => {
+          entry.resizeSettling = false
+        }, 200)
+      }
     })
     fitAddon.fit()
-    store.sendResize(pid, t.cols, t.rows)
     store.sendSubscribe(pid)
+    store.sendResize(pid, t.cols, t.rows)
 
-    // Resize observer for subsequent size changes
+    // Resize observer for subsequent size changes (50ms debounce — with
+    // async input on the agent, the output channel drains continuously,
+    // so small debounce gives snappy visual feedback without corruption)
     let resizeTimer: ReturnType<typeof setTimeout>
     const resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         fitAddon.fit()
-        store.sendResize(pid, t.cols, t.rows)
+        const entry = terminalRegistry.get(pid)
+        if (entry && sendResizeIfChanged(entry, store)) {
+          entry.resizeSettling = true
+          clearTimeout(entry.resizeIdleTimer)
+          entry.resizeIdleTimer = setTimeout(() => {
+            entry.resizeSettling = false
+          }, 2000)
+        }
       }, 50)
     })
     resizeObserver.observe(containerRef.value)
@@ -224,7 +280,17 @@ export function useTerminal(
     // Second fit after layout settles (container might not have final dimensions yet)
     requestAnimationFrame(() => {
       fitAddon.fit()
-      store.sendResize(pid, t.cols, t.rows)
+      const entry = terminalRegistry.get(pid)
+      if (entry) {
+        sendResizeIfChanged(entry, store)
+        // Enable scroll-to-bottom for initial SIGWINCH redraw data.
+        // The resize + subscribe just sent will trigger a redraw from the
+        // remote; auto-scroll ensures the ❯ prompt is visible.
+        entry.resizeSettling = true
+        entry.resizeIdleTimer = setTimeout(() => {
+          entry.resizeSettling = false
+        }, 2000)
+      }
     })
 
     // Don't write anything to the terminal — the agent sends a clear screen
@@ -239,6 +305,11 @@ export function useTerminal(
       resizeObserver,
       cleanupFns,
       refCount: 1,
+      lastSentCols: t.cols,
+      lastSentRows: t.rows,
+      resizeSettling: false,
+      resizeIdleTimer: undefined,
+      reattachGuard: false,
     })
 
     term.value = t

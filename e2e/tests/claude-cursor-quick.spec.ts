@@ -1,13 +1,42 @@
 /**
- * Quick validation: Claude Code prompt renders correctly after P2P connect.
- * Success: terminal ends with ❯ prompt + bypass permissions line.
+ * Quick validation: Claude Code prompt renders correctly after P2P connect
+ * and survives view switching (single → mashed → single).
+ *
+ * Success: terminal contains ❯ prompt + bypass permissions line.
  */
 import { test, expect } from '@playwright/test'
 
 const USER = process.env.E2E_USER || 'gjovanov2'
 const PASS = process.env.E2E_PASS || 'Gj12345!!'
 
-test('Claude Code prompt visible after WebRTC P2P connect', async ({ page, context }) => {
+/** Poll readTerm() until predicate is true or timeout */
+async function waitForTerm(
+  page: import('@playwright/test').Page,
+  predicate: (content: string) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<{ content: string; ok: boolean }> {
+  const start = Date.now()
+  let content = ''
+  while (Date.now() - start < timeoutMs) {
+    content = await page.evaluate(() => {
+      const rows = document.querySelectorAll('.xterm-rows > div')
+      return Array.from(rows).map(r => r.textContent || '').join('\n')
+    }) || ''
+    if (predicate(content)) {
+      console.log(`[${label}] matched after ${Date.now() - start}ms`)
+      return { content, ok: true }
+    }
+    await page.waitForTimeout(500)
+  }
+  console.log(`[${label}] timed out after ${timeoutMs}ms`)
+  console.log(`[${label}] last 200 chars: ${content.slice(-200)}`)
+  return { content, ok: false }
+}
+
+const hasPrompt = (c: string) => c.includes('❯') && c.includes('bypass permissions')
+
+test('Claude Code prompt visible after WebRTC P2P connect + view switch', async ({ page, context }) => {
   test.setTimeout(300_000)
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
 
@@ -34,7 +63,7 @@ test('Claude Code prompt visible after WebRTC P2P connect', async ({ page, conte
     await expect(mars1.locator('.ms-status.connected')).toBeVisible({ timeout: 45_000 })
   }
 
-  // Agent + WebRTC
+  // Agent + WebRTC P2P
   const ib = mars1.locator('.action-btn.install')
   if (await ib.isVisible({ timeout: 3000 }).catch(() => false)) {
     await ib.click()
@@ -48,8 +77,9 @@ test('Claude Code prompt visible after WebRTC P2P connect', async ({ page, conte
       if (logs.some(l => l.includes('WebRTC P2P connected!'))) break
     }
   }
+  console.log('P2P connected:', logs.some(l => l.includes('WebRTC P2P connected!')))
 
-  // Single view + select pane
+  // ── Single view + select pane ──────────────────────────────────────
   const pn = page.locator('.pane-node').first()
   await expect(pn).toBeVisible({ timeout: 15_000 })
 
@@ -58,83 +88,71 @@ test('Claude Code prompt visible after WebRTC P2P connect', async ({ page, conte
   await page.waitForTimeout(500)
   await pn.click()
   await page.waitForTimeout(1000)
-  await page.locator('.terminal-pane').click()
-  await page.waitForTimeout(3000)
 
-  // Read terminal content
-  async function readTerm(): Promise<string> {
-    return await page.evaluate(() => {
-      const rows = document.querySelectorAll('.xterm-rows > div')
-      return Array.from(rows).map(r => r.textContent || '').join('\n')
-    }) || ''
-  }
+  // Focus terminal
+  const termPane = page.locator('.terminal-pane, .claude-pane').first()
+  if (await termPane.isVisible({ timeout: 5000 }).catch(() => false)) await termPane.click()
+  await page.waitForTimeout(2000)
 
-  let content = await readTerm()
-  console.log('Initial content (last 200):', content.slice(-200))
   await page.screenshot({ path: 'e2e/screenshots/cursor-quick-01-initial.png' })
 
-  // Exit any running Claude session first
+  // ── Exit any running Claude session ────────────────────────────────
+  // Escape first (in case Claude is in a sub-prompt), then Ctrl+D × 2
   console.log('Exiting any running Claude session...')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(500)
   await page.keyboard.down('Control')
   await page.keyboard.press('d')
   await page.keyboard.up('Control')
   await page.waitForTimeout(2000)
-  await page.keyboard.down('Control')
-  await page.keyboard.press('d')
-  await page.keyboard.up('Control')
-  await page.waitForTimeout(3000)
 
-  // Start FRESH Claude Code (no --continue to avoid long history)
-  {
-    console.log('Starting fresh Claude Code...')
-    await page.keyboard.type('bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions', { delay: 10 })
-    await page.keyboard.press('Enter')
-
-    // Wait for Claude to render (up to 60s)
-    for (let i = 0; i < 30; i++) {
-      await page.waitForTimeout(2000)
-      content = await readTerm()
-      if (content.includes('❯') && content.includes('bypass permissions')) {
-        console.log(`Claude started after ${(i + 1) * 2}s`)
-        break
-      }
-    }
-    await page.screenshot({ path: 'e2e/screenshots/cursor-quick-02-claude-started.png' })
+  // Check if we're at a shell prompt ($ or ~ or gjovanov)
+  let { content } = await waitForTerm(page, c => c.includes('$') || c.includes('~'), 'shell-check', 5000)
+  if (!content.includes('$') && !content.includes('~')) {
+    // Still in Claude or nested — send another Ctrl+D
+    await page.keyboard.down('Control')
+    await page.keyboard.press('d')
+    await page.keyboard.up('Control')
+    await page.waitForTimeout(3000)
   }
 
-  content = await readTerm()
-  const hasPrompt = content.includes('❯')
-  const hasBypass = content.includes('bypass permissions')
-  console.log(`After start: prompt=${hasPrompt} bypass=${hasBypass}`)
+  // ── Start FRESH Claude Code ────────────────────────────────────────
+  console.log('Starting fresh Claude Code...')
+  await page.keyboard.type('bunx --bun @anthropic-ai/claude-code --dangerously-skip-permissions', { delay: 10 })
+  await page.keyboard.press('Enter')
 
-  // Now switch to mashed, then back to single
+  // Poll for Claude prompt (up to 60s)
+  const startResult = await waitForTerm(page, hasPrompt, 'claude-start', 60_000)
+  await page.screenshot({ path: 'e2e/screenshots/cursor-quick-02-claude-started.png' })
+  console.log(`After start: prompt=${startResult.ok}`)
+
+  // Gate: initial render must work before testing view switching
+  expect(startResult.ok, 'Claude ❯ prompt should be visible after start').toBe(true)
+
+  // ── View switch: Single → Mashed → Single ─────────────────────────
   console.log('Switching to mashed...')
   const mashedBtn = page.locator('.toggle-btn', { hasText: 'Mashed' })
   if (await mashedBtn.isVisible({ timeout: 3000 }).catch(() => false)) await mashedBtn.click()
-  await page.waitForTimeout(3000)
 
-  content = await readTerm()
-  console.log('Mashed (last 200):', content.slice(-200))
+  // Poll for prompt in mashed view (terminal is smaller, content may differ)
+  const mashedResult = await waitForTerm(page, hasPrompt, 'mashed-view', 10_000)
   await page.screenshot({ path: 'e2e/screenshots/cursor-quick-03-mashed.png' })
+  console.log(`Mashed: prompt=${mashedResult.ok}`)
 
   console.log('Switching back to single...')
   if (await singleBtn.isVisible({ timeout: 3000 }).catch(() => false)) await singleBtn.click()
   await page.waitForTimeout(500)
   await pn.click()
-  await page.waitForTimeout(5000)
 
-  content = await readTerm()
-  console.log('Single back (last 200):', content.slice(-200))
+  // Poll for prompt after switching back to single (up to 15s for resize settle)
+  const singleResult = await waitForTerm(page, hasPrompt, 'single-back', 15_000)
   await page.screenshot({ path: 'e2e/screenshots/cursor-quick-04-single-back.png' })
+  console.log(`Single back: prompt=${singleResult.ok}`)
 
-  const finalPrompt = content.includes('❯')
-  const finalBypass = content.includes('bypass permissions')
-  console.log(`Final: prompt=${finalPrompt} bypass=${finalBypass}`)
-
-  // Log P2P status
+  // ── Status ─────────────────────────────────────────────────────────
   console.log(`P2P lost: ${logs.filter(l => l.includes('P2P lost')).length}`)
   console.log(`Control mode exits: ${logs.filter(l => l.includes('control mode exited')).length}`)
 
-  expect.soft(finalPrompt, 'Claude ❯ prompt should be visible').toBe(true)
-  expect.soft(finalBypass, 'bypass permissions line should be visible').toBe(true)
+  // Assertions
+  expect.soft(singleResult.ok, 'Claude ❯ prompt should be visible after view switch back to single').toBe(true)
 })
