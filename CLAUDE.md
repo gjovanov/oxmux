@@ -187,3 +187,35 @@ docker compose up server       # server only
 | Terminal pane | `client/src/components/TerminalPane.vue` |
 | Session sidebar | `client/src/components/SessionSidebar.vue` |
 | App layout | `client/src/App.vue` |
+
+## Deployment
+
+Deployment configuration lives in sibling repo `../oxmux-deploy/` (GitHub: `gjovanov/oxmux-deploy`). Kustomize manifests under `k8s/base/` + `k8s/overlays/prod/`. Pod runs on `k8s-worker-2` with NodePort 30080 (HTTP) and NodePort 30443/UDP (QUIC).
+
+**GitOps**: ArgoCD at [argocd.roomler.ai](https://argocd.roomler.ai) reconciles the `oxmux` Application from `github.com/gjovanov/oxmux-deploy @ gitops-pilot` path `k8s/overlays/prod`. Sync policy is **Manual** — `git push` alone won't deploy; trigger via `argocd app sync oxmux` or UI.
+
+**Image registry**: `registry.roomler.ai` (self-hosted Docker Registry v2 on mars, basic auth). Pull secret `regcred` in the `oxmux` namespace.
+
+Secrets (`oxmux-secret`, `ssh-keys`) are sealed via Bitnami SealedSecrets and committed to git under `k8s/base/sealed/`.
+
+### Deployment Workflow
+
+```bash
+ssh mars
+cd /home/gjovanov/oxmux && git pull
+docker build -t registry.roomler.ai/oxmux:build-$$ .
+TAG="v$(date +%Y%m%d)-$(docker images -q registry.roomler.ai/oxmux:build-$$ | head -c 12)"
+docker tag registry.roomler.ai/oxmux:build-$$ registry.roomler.ai/oxmux:$TAG
+docker tag registry.roomler.ai/oxmux:build-$$ registry.roomler.ai/oxmux:latest
+docker push registry.roomler.ai/oxmux:$TAG
+docker push registry.roomler.ai/oxmux:latest
+
+cd /home/gjovanov/oxmux-deploy && git checkout gitops-pilot
+sed -i "s|newTag:.*|newTag: $TAG|" k8s/overlays/prod/kustomization.yaml
+git commit -am "chore(k8s): bump oxmux to $TAG" && git push
+
+argocd app sync oxmux --grpc-web
+curl -sI https://oxmux.app/                  # HTTP 200
+```
+
+Registry retention: `/home/gjovanov/.local/bin/registry-retention.sh 1` (weekly cron Sun 04:00) keeps at most 2 tags per repo.
